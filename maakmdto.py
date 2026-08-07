@@ -1,152 +1,152 @@
-
-import mdto 
-from mdto.gegevensgroepen import * 
-from pathlib import Path 
+from mdto.gegevensgroepen import *
+from pathlib import Path
 import shutil 
-import sys 
+import sys
 import pandas #om te installeren: python3 -m pip install pandas en: python3 -m pip install openpyxl
 from config import bronMap, doelMap, excelmap
 
-# Als je nog geen excel hebt, is dit het statement om alle bestanden tonen, hiermee kan je de excel, kolom BestandsnaamInclPad voeden. 
-# for bestand in bronMap.rglob("*"): 
-#       if bestand.is_file(): 
-#           relatieve_naam = bestand.relative_to(bronMap) 
-#           print(relatieve_naam) 
+# Als je nog geen excel hebt, is dit het statement om alle bestanden tonen,
+# hiermee kan je de excel, kolom BestandsnaamInclPad voeden.
+# for bestand in bronMap.rglob("*"):
+#       if bestand.is_file():
+#           relatieve_naam = bestand.relative_to(bronMap)
+#           print(relatieve_naam)
 
-# inlezen begeleidende excel: 
-excel = Path(excelmap / "Bestandsbeschrijvingen.xlsx") 
+# inlezen begeleidende excel:
+excel = Path(excelmap / "Bestandsbeschrijvingen.xlsx")
 if not excel.exists(): 
-    print(f"Bestand '{excel}' ontbreekt op {excelmap}.") 
-    sys.exit("voortijdig einde") 
-
-# Eerste werkblad inlezen 
-df = pandas.read_excel(excel, sheet_name=0) 
-vereiste_kolommen = ["BestandsnaamInclPad", "id-uitgever", "vergadering.id", "vergadering.naam", "doc.id", "doc.naam", "doc.classificatie", "doc.vaststellingsdatum"] 
-ontbrekende_kolommen = [ 
-    kolom for kolom in vereiste_kolommen if kolom not in df.columns 
-    ] 
-if ontbrekende_kolommen: 
-    print(f"Excel gevonden, maar er ontbreken kolommen: {', '.join(ontbrekende_kolommen)}") 
+    print(f"Bestand '{excel}' ontbreekt op {excelmap}.")
     sys.exit("voortijdig einde")
-    print("Excel gevonden en alle vereiste kolommen zijn aanwezig.") 
+
+# Eerste werkblad inlezen
+df = pandas.read_excel(excel, sheet_name=0)
+vereiste_kolommen = ["BestandsnaamInclPad", "id-uitgever", "vergadering.id", "vergadering.naam", "doc.id", "doc.naam", "doc.classificatie", "doc.vaststellingsdatum"]
+ontbrekende_kolommen = [
+    kolom for kolom in vereiste_kolommen if kolom not in df.columns
+    ]
+if ontbrekende_kolommen: 
+    print(f"Excel gevonden, maar er ontbreken kolommen: {', '.join(ontbrekende_kolommen)}")
+    sys.exit("voortijdig einde")
+
+print("Excel gevonden en alle vereiste kolommen zijn aanwezig.")
 
 #de doelmap maken of legen: 
-doelMap.mkdir(parents=True, exist_ok=True) 
-if bronMap != doelMap: 
-    for item in doelMap.iterdir(): 
+doelMap.mkdir(parents=True, exist_ok=True)
+if bronMap != doelMap:
+    for item in doelMap.iterdir():
         if item.is_dir(): 
-            shutil.rmtree(item) 
+            shutil.rmtree(item)
         else: 
-            item.unlink() 
-else: 
-    print("bronmap gelijk aan doelmap, wordt nog niet ondersteund") 
-    sys.exit("voortijdig einde") 
+            item.unlink()
+else:
+    print("bronmap gelijk aan doelmap, wordt nog niet ondersteund")
+    sys.exit("voortijdig einde")
 
-# Maak een set met alle relatieve paden in BronMap, nodig voor de controle verderop. 
+# Maak een set met alle relatieve paden in BronMap, nodig voor de controle verderop.
 bestanden = {
     Path(p.relative_to(bronMap))
     for p in bronMap.rglob("*")
     if p.is_file() 
-    } 
+    }
 
-#Eerst de dingen klaarzetten die voor elke regel gelijk zijn: 
-archiefvormer = VerwijzingGegevens( 
-    verwijzingNaam="gemeente Stichtse Vecht", 
-    verwijzingIdentificatie=IdentificatieGegevens("gm1904","TOOI register gemeenten compleet") 
+#Eerst de dingen klaarzetten die voor elke regel gelijk zijn:
+archiefvormer = VerwijzingGegevens(
+    verwijzingNaam="gemeente Stichtse Vecht",
+    verwijzingIdentificatie=IdentificatieGegevens("gm1904","TOOI register gemeenten compleet")
     ) 
 
 #waardering is altijd blijvend te bewaren
-waardering = BegripGegevens(begripLabel="Blijvend te bewaren", 
-                            begripCode="B", 
-                            begripBegrippenlijst=VerwijzingGegevens("Begrippenlijst Waarderingen MDTO") 
+waardering = BegripGegevens(begripLabel="Blijvend te bewaren",
+                            begripCode="B",
+                            begripBegrippenlijst=VerwijzingGegevens("Begrippenlijst Waarderingen MDTO")
                             ) 
 # vooralsnog Geen beperkingen, TODO: aanpassen formatting en toevoegen andere attributen 
-beperkingType = BegripGegevens("Geen beperking", VerwijzingGegevens("Begrippenlijst BeperkingGebruikTypeLijst MDTO")) 
-beperkingGebruik = BeperkingGebruikGegevens(beperkingGebruikType=beperkingType) 
+beperkingType = BegripGegevens("Geen beperking", VerwijzingGegevens("Begrippenlijst BeperkingGebruikTypeLijst MDTO"))
+beperkingGebruik = BeperkingGebruikGegevens(beperkingGebruikType=beperkingType)
 
-# OK, all set, here we go. We gaan voor elke rij uit de excel objecten aanmaken: 
-vergaderingId="" 
-for index, rij in df.iterrows(): 
-    BestandsnaamInclPad = Path(str(rij["BestandsnaamInclPad"]).strip()) 
+# OK, all set, here we go. We gaan voor elke rij uit de excel objecten aanmaken:
+vergaderingId=""
+for index, rij in df.iterrows():
+    BestandsnaamInclPad = Path(str(rij["BestandsnaamInclPad"]).strip())
 
     if BestandsnaamInclPad in bestanden: 
         print(f"Verwerken rij {index + 2}: {BestandsnaamInclPad}") 
-    else: 
-        print(f"FOUT: Rij {index + 2}: bestand '{BestandsnaamInclPad}' is niet gevonden in {bronMap}") 
-        continue 
+    else:
+        print(f"FOUT: Rij {index + 2}: bestand '{BestandsnaamInclPad}' is niet gevonden in {bronMap}")
+        continue
 
-    #Een kopie van het bestand naar doelmap zetten (lukt niet binnen een 'try') 
-    bestand = bronMap / BestandsnaamInclPad 
-    doelbestand = doelMap / BestandsnaamInclPad 
-    doelbestand.parent.mkdir(parents=True, exist_ok=True) 
+    #Een kopie van het bestand naar doelmap zetten (aangepast zodat het het met een try ook werkt)
+    bestand = bronMap / BestandsnaamInclPad
+    doelbestand = doelMap / BestandsnaamInclPad
+    doelbestand.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        shutil.copy2(bestand, doelbestand) 
+        shutil.copy2(bestand, doelbestand)
         print("bestanden succesvol gekopieerd.")
-    except Exception as fout: 
-            print(f"FOUT bij kopieren {bestand}: {type(fout).__name__}: {fout}")
+    except Exception as fout:
+        print(f"FOUT bij kopieren {bestand}: {type(fout).__name__}: {fout}")
 
-    try: 
+    try:
         # eerst een vergaderobject aanmaken als we een nieuwe vergadering aantreffen
         # Voor differentiatie vergaderobject genoemd, maar het is een informatieobject
         # TODO agendapunten aanmaken als informatieobject
-        if vergaderingId != str(rij["id-uitgever"]).strip() + "." + str(rij["vergadering.id"]).strip(): 
-            vergaderingId = str(rij["id-uitgever"]).strip() + "." + str(rij["vergadering.id"]).strip() 
-            vergaderingNaam = str(rij["vergadering.naam"]).strip() 
-            print(f"Nieuwe vergadering {vergaderingNaam}") 
-            # maak identificatiekenmerk element 
-            vergaderingInformatieobjectIdentificatieGegegevens = IdentificatieGegevens(vergaderingId, "gemeente Stichtse Vecht") 
+        if vergaderingId != str(rij["id-uitgever"]).strip() + "." + str(rij["vergadering.id"]).strip():
+            vergaderingId = str(rij["id-uitgever"]).strip() + "." + str(rij["vergadering.id"]).strip()
+            vergaderingNaam = str(rij["vergadering.naam"]).strip()
+            print(f"Nieuwe vergadering {vergaderingNaam}")
+            # maak identificatiekenmerk element
+            vergaderingInformatieobjectIdentificatieGegegevens = IdentificatieGegevens(vergaderingId, "gemeente Stichtse Vecht")
 
-            #optionele parameters komen in optargs: 
-            optargs = {} 
+            #optionele parameters komen in optargs:
+            optargs = {}
 
-            # maak vergaderobject op basis van deze gegevens 
-            informatieobject = Informatieobject ( 
-                identificatie = vergaderingInformatieobjectIdentificatieGegegevens, 
-                naam = vergaderingNaam, 
-                waardering = waardering, 
+            # maak vergaderobject op basis van deze gegevens
+            informatieobject = Informatieobject (
+                identificatie = vergaderingInformatieobjectIdentificatieGegegevens,
+                naam = vergaderingNaam,
+                waardering = waardering,
                 archiefvormer = archiefvormer,
                 beperkingGebruik = beperkingGebruik,
-                aggregatieniveau = BegripGegevens("Dossier", VerwijzingGegevens("Begrippenlijst Aggregatieniveaus MDTO")), 
-                **optargs 
-                ) 
+                aggregatieniveau = BegripGegevens("Dossier", VerwijzingGegevens("Begrippenlijst Aggregatieniveaus MDTO")),
+                **optargs
+                )
 
             # vergaderobject opslaan (naam moet gelijk zijn aan de bovenliggende map)
-            # Het script gaat nu uit van de doelmap als de map die de naam van de vergadering bevat. 
-            vergadering_map = BestandsnaamInclPad.parent 
+            # Het script gaat nu uit van de doelmap als de map die de naam van de vergadering bevat.
+            vergadering_map = BestandsnaamInclPad.parent
 
-            # Bestand staat direct in de bronmap: de doelmap is de vergadering. In de SIP zit maar één vergadering 
-            if vergadering_map == Path("."): 
-                vergadering_naam = doelMap.name 
-                uitvoermap = doelMap 
+            # Bestand staat direct in de bronmap: de doelmap is de vergadering. In de SIP zit maar één vergadering
+            if vergadering_map == Path(""):
+                vergadering_naam = doelMap.name
+                uitvoermap = doelMap
 
-            # Bestand staat in een submap: die submap is de vergadering. In de SIP zitten meerdere vergaderingen 
-            else: 
-                vergadering_naam = vergadering_map.name 
-                uitvoermap = doelMap / vergadering_map 
+            # Bestand staat in een submap: die submap is de vergadering. In de SIP zitten meerdere vergaderingen
+            else:
+                vergadering_naam = vergadering_map.name
+                uitvoermap = doelMap / vergadering_map
 
-            uitvoerbestand = uitvoermap / f"{vergadering_naam}.mdto.xml" 
+            uitvoerbestand = uitvoermap / f"{vergadering_naam}.mdto.xml"
             uitvoerbestand.parent.mkdir(parents=True, exist_ok=True)
-            informatieobject.save(uitvoerbestand) 
-            print(f"- vergaderobject aangemaakt: {uitvoerbestand}") 
+            informatieobject.save(uitvoerbestand)
+            print(f"- vergaderobject aangemaakt: {uitvoerbestand}")
 
-        # per bestand maken we eerst het informatieobject aan: 
+        # per bestand maken we eerst het informatieobject aan:
         id = str(rij["id-uitgever"]).strip() + "." + str(rij["doc.id"]).strip()
-        bestandInformatieobjectIdentificatieGegegevens = IdentificatieGegevens(id, "gemeente Stichtse Vecht") 
+        bestandInformatieobjectIdentificatieGegegevens = IdentificatieGegevens(id, "gemeente Stichtse Vecht")
 
         #optionele parameters komen in optargs:
-        optargs = {} 
+        optargs = {}
 
         # de vaststelling als event meegeven UNDER CONSTRUCTION:
-        vaststellingsdatum = rij["doc.vaststellingsdatum"] 
-        if pandas.notna(vaststellingsdatum): 
-                datum_string = vaststellingsdatum.strftime("%Y-%m-%d" + "T23:00:00") 
-                #print (datum_string) 
+        vaststellingsdatum = rij["doc.vaststellingsdatum"]
+        if pandas.notna(vaststellingsdatum):
+            datum_string = vaststellingsdatum.strftime("%Y-%m-%d" + "T23:00:00")
+            #print (datum_string)
         
-        # maak informatieobject voor het bestand: 
-        informatieobject = Informatieobject ( 
+        # maak informatieobject voor het bestand:
+        informatieobject = Informatieobject (
             identificatie = bestandInformatieobjectIdentificatieGegegevens, 
-            naam = str(rij["doc.naam"]).strip(), 
+            naam = str(rij["doc.naam"]).strip(),
             waardering = waardering,
             archiefvormer = archiefvormer,
             beperkingGebruik = beperkingGebruik, 
@@ -190,8 +190,11 @@ for index, rij in df.iterrows():
     except Exception as fout: 
         print(f"FOUT bij {bestand}: {type(fout).__name__}: {fout}") 
 
+    # Een except die wat meer info geeft, was nodig voor het troubleshooten met mimetype.
+    # Statement kan er in een later stadium weer uit
     # except Exception:
     #     import traceback
     #     traceback.print_exc()
 
 print("Klaar.")
+# Einde
