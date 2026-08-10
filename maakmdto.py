@@ -1,3 +1,4 @@
+# Gemaakt door Thijs Vorstenburg
 from mdto.gegevensgroepen import *
 from pathlib import Path
 import shutil 
