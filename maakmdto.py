@@ -1,4 +1,5 @@
-# Gemaakt door Thijs Vorstenburg
+# Gemaakt door Thijs Vorstenburg en Ronald Koenis
+import mdto
 from mdto.gegevensgroepen import *
 from pathlib import Path
 import shutil 
@@ -21,7 +22,7 @@ if not excel.exists():
 
 # Eerste werkblad inlezen
 df = pandas.read_excel(excel, sheet_name=0)
-vereiste_kolommen = ["BestandsnaamInclPad", "id-uitgever", "vergadering.id", "vergadering.naam", "doc.id", "doc.naam", "doc.classificatie", "doc.vaststellingsdatum"]
+vereiste_kolommen = ["BestandsnaamInclPad", "id-uitgever", "vergadering.id", "vergadering.naam", "vergaderdatum", "doc.id", "doc.naam", "doc.classificatie", "doc.vaststellingsdatum"]
 ontbrekende_kolommen = [
     kolom for kolom in vereiste_kolommen if kolom not in df.columns
     ]
@@ -57,10 +58,21 @@ archiefvormer = VerwijzingGegevens(
     ) 
 
 #waardering is altijd blijvend te bewaren
-waardering = BegripGegevens(begripLabel="Blijvend te bewaren",
-                            begripCode="B",
-                            begripBegrippenlijst=VerwijzingGegevens("Begrippenlijst Waarderingen MDTO")
-                            ) 
+waardering = BegripGegevens(
+    begripLabel="Blijvend te bewaren",
+    begripCode="B",
+    begripBegrippenlijst=VerwijzingGegevens("Begrippenlijst Waarderingen MDTO")
+    ) 
+informatiecategorie = BegripGegevens(
+    begripLabel="Agenda, verslag en besluitenlijst van bestuurlijke besluitvorming - Verwerkt",
+    begripCode="19.1.6",
+    begripBegrippenlijst=VerwijzingGegevens("Selectielijst gemeenten en intergemeentelijke organen 2017")
+    )
+informatiecategorieMotie = BegripGegevens(
+    begripLabel="Adhesiebetuiging en/of motie - Ingewilligd",
+    begripCode="6.1.4",
+    begripBegrippenlijst=VerwijzingGegevens("Selectielijst gemeenten en intergemeentelijke organen 2017")
+    )
 # vooralsnog Geen beperkingen, TODO: aanpassen formatting en toevoegen andere attributen 
 beperkingType = BegripGegevens("Geen beperking", VerwijzingGegevens("Begrippenlijst BeperkingGebruikTypeLijst MDTO"))
 beperkingGebruik = BeperkingGebruikGegevens(beperkingGebruikType=beperkingType)
@@ -83,7 +95,7 @@ for index, rij in df.iterrows():
 
     try:
         shutil.copy2(bestand, doelbestand)
-        print("bestanden succesvol gekopieerd.")
+        print("Bestand gekopieerd.")
     except Exception as fout:
         print(f"FOUT bij kopieren {bestand}: {type(fout).__name__}: {fout}")
 
@@ -95,9 +107,21 @@ for index, rij in df.iterrows():
             vergaderingId = str(rij["id-uitgever"]).strip() + "." + str(rij["vergadering.id"]).strip()
             vergaderingNaam = str(rij["vergadering.naam"]).strip()
             print(f"Nieuwe vergadering {vergaderingNaam}")
+            
             # maak identificatiekenmerk element
             vergaderingInformatieobjectIdentificatieGegegevens = IdentificatieGegevens(vergaderingId, "gemeente Stichtse Vecht")
-
+            vergaderdatum = rij["vergaderdatum"]
+            # TODO: de aanvangstijd ergens aan toevoegen.
+            if pandas.notna(vergaderdatum):
+                datum_string = vergaderdatum.strftime("%Y-%m-%d")
+            else:    
+                print(f"FOUT: de vergaderdatum is niet gevonden")
+                sys.exit("voortijdig einde")
+            vergaderingDekkingInTijd = DekkingInTijdGegevens(
+                dekkingInTijdType = BegripGegevens("vergaderdatum", VerwijzingGegevens("Begrippenlijst TODO")),
+                dekkingInTijdBegindatum = datum_string
+                )
+            
             #optionele parameters komen in optargs:
             optargs = {}
 
@@ -106,7 +130,10 @@ for index, rij in df.iterrows():
                 identificatie = vergaderingInformatieobjectIdentificatieGegegevens,
                 naam = vergaderingNaam,
                 waardering = waardering,
+                informatiecategorie = informatiecategorie,
                 archiefvormer = archiefvormer,
+                taal = "nl",
+                dekkingInTijd = vergaderingDekkingInTijd,
                 beperkingGebruik = beperkingGebruik,
                 aggregatieniveau = BegripGegevens("Dossier", VerwijzingGegevens("Begrippenlijst Aggregatieniveaus MDTO")),
                 **optargs
@@ -149,7 +176,9 @@ for index, rij in df.iterrows():
             identificatie = bestandInformatieobjectIdentificatieGegegevens, 
             naam = str(rij["doc.naam"]).strip(),
             waardering = waardering,
+            informatiecategorie = informatiecategorieMotie if str(rij["doc.classificatie"]).strip().lower() == "motie"  else informatiecategorie,
             archiefvormer = archiefvormer,
+            taal = "nl",
             beperkingGebruik = beperkingGebruik, 
             aggregatieniveau = BegripGegevens("Archiefstuk", VerwijzingGegevens("Begrippenlijst Aggregatieniveaus MDTO")),
             classificatie = BegripGegevens(str(rij["doc.classificatie"]).strip(), VerwijzingGegevens("Begrippenlijst TODO")),
