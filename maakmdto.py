@@ -1,4 +1,10 @@
 # Gemaakt door Thijs Vorstenburg en Ronald Koenis
+#
+# Het script is gemaakt om raadsvergaderingsbestanden die op een bronmap staan, te voorzien van een MDTO-laag, 
+# zodat het is in te lezen in bv MAIS-Flexis.
+# Behalve de bestanden, is een excel met aanvullende metadata nodig. Die excel is het startpunt voor dit script.
+
+# We gebruiken deze andere python-modules:
 import mdto
 from mdto.gegevensgroepen import *
 from pathlib import Path
@@ -9,10 +15,12 @@ from config import bronMap, doelMap, excelmap
 
 # Als je nog geen excel hebt, is dit het statement om alle bestanden tonen,
 # hiermee kan je de excel, kolom BestandsnaamInclPad voeden.
-# for bestand in bronMap.rglob("*"):
-#       if bestand.is_file():
-#           relatieve_naam = bestand.relative_to(bronMap)
-#           print(relatieve_naam)
+#FIXME: als een bestandsnaam 2 spaties achter elkaar bevat, komt het niet goed in de print
+#for bestand in bronMap.rglob("*"):
+#    if bestand.is_file():
+#        relatieve_naam = bestand.relative_to(bronMap)
+#        print(relatieve_naam)
+#sys.exit("voortijdig einde")
 
 # inlezen begeleidende excel:
 excel = Path(excelmap / "Bestandsbeschrijvingen.xlsx")
@@ -161,7 +169,7 @@ for index, rij in df.iterrows():
                 )
             bestandIsOnderdeel = VergaderingVerwijzingGegevens
 
-        # Twee: mischien een agendapunt aanmaken als informatieobject
+        # Mischien een agendapunt aanmaken als informatieobject
         if pandas.notna(rij["agendapunt.id"]):
             vgnr = int(rij["vergadering.id"])
             apnr = int(rij["agendapunt.id"])
@@ -187,10 +195,11 @@ for index, rij in df.iterrows():
                     isOnderdeelVan = VergaderingVerwijzingGegevens
                     )
 
-                # agendapuntobject opslaan (naam moet gelijk zijn aan de bovenliggende map)
+                # agendapuntobject opslaan 
                 agendapuntMap = BestandsnaamInclPad.parent
                 uitvoermap = doelMap / agendapuntMap
-                uitvoerbestand = uitvoermap / f"{agendapuntMap.name}.mdto.xml"
+                # de naam is gelijk zijn aan de map, maar het kan zijn dat een agenda-punt in de vergadermap zelf staat, daarom komt het apnr in de naam, zodat het uniek is.
+                uitvoerbestand = uitvoermap / f"{agendapuntMap.name}_A{apnr}.mdto.xml" #
                 uitvoerbestand.parent.mkdir(parents=True, exist_ok=True)
                 informatieobject.save(uitvoerbestand)
                 print(f"- agendapuntobject aangemaakt: {uitvoerbestand}")
@@ -205,13 +214,15 @@ for index, rij in df.iterrows():
             bestandIsOnderdeel = VergaderingVerwijzingGegevens
                 
         # per bestand maken we eerst het informatieobject aan:
+        # technical debt: het id kunnen we beter opbouwen met de vergaderid erin.
         id = str(rij["id-uitgever"]).strip() + "." + str(rij["doc.id"]).strip()
         bestandInformatieobjectIdentificatieGegegevens = IdentificatieGegevens(id, "gemeente Stichtse Vecht")
 
         #optionele parameters komen in optargs:
         optargs = {}
 
-        # de vaststelling als event meegeven UNDER CONSTRUCTION:
+        # de vaststelling als event meegeven 
+        # UNDER CONSTRUCTION:
         vaststellingsdatum = rij["doc.vaststellingsdatum"]
         if pandas.notna(vaststellingsdatum):
             datum_string = vaststellingsdatum.strftime("%Y-%m-%d" + "T23:00:00")
@@ -232,8 +243,7 @@ for index, rij in df.iterrows():
             **optargs 
             ) 
 
-        # informatieobject opslaan (de .rsplit(".", 1)[0] haalt de extensie weg): 
-        # uitvoerbestand = doelMap / (BestandsnaamInclPad.rsplit(".", 1)[0] + ".mdto.xml") --> rsplit vervangen omdat string gaf problemen met windows versus Mac 
+        # informatieobject opslaan 
         uitvoerbestand = doelMap / BestandsnaamInclPad.with_suffix(".mdto.xml") 
         uitvoerbestand.parent.mkdir(parents=True, exist_ok=True)
         informatieobject.save(uitvoerbestand) 
