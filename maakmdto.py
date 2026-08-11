@@ -1,4 +1,4 @@
-# Gemaakt door Thijs Vorstenburg en Ronald Koenis
+# Gemaakt door Thijs Vorstenburg en Ronald Koenis.
 #
 # Het script is gemaakt om raadsvergaderingsbestanden die op een bronmap staan, te voorzien van een MDTO-laag, 
 # zodat het is in te lezen in bv MAIS-Flexis.
