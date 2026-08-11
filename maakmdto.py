@@ -108,8 +108,7 @@ for index, rij in df.iterrows():
         print(f"FOUT bij kopieren {bestand}: {type(fout).__name__}: {fout}")
 
     try:
-        # eerst een vergaderobject aanmaken als we een nieuwe vergadering aantreffen
-        # Voor differentiatie vergaderobject genoemd, maar het is een informatieobject
+        # eerst een vergader-informatieobject aanmaken als we een nieuwe vergadering aantreffen
         if vergaderingId != str(rij["id-uitgever"]).strip() + "." + str(rij["vergadering.id"]).strip():
             vergaderingId = str(rij["id-uitgever"]).strip() + "." + str(rij["vergadering.id"]).strip()
             vergaderingNaam = str(rij["vergadering.naam"]).strip()
