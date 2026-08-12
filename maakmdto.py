@@ -1,3 +1,11 @@
+# Gemaakt door Thijs Vorstenburg en Ronald Koenis.
+#
+# Het script is gemaakt om raadsvergaderingsbestanden die op een bronmap staan, te voorzien van een MDTO-laag, 
+# zodat het is in te lezen in bv MAIS-Flexis.
+# Behalve de bestanden, is een excel met aanvullende metadata nodig. Die excel is het startpunt voor dit script.
+
+# We gebruiken deze andere python-modules:
+import mdto
 from mdto.gegevensgroepen import *
 from pathlib import Path
 import shutil 
@@ -7,10 +15,12 @@ from config import bronMap, doelMap, excelmap
 
 # Als je nog geen excel hebt, is dit het statement om alle bestanden tonen,
 # hiermee kan je de excel, kolom BestandsnaamInclPad voeden.
-# for bestand in bronMap.rglob("*"):
-#       if bestand.is_file():
-#           relatieve_naam = bestand.relative_to(bronMap)
-#           print(relatieve_naam)
+#FIXME: als een bestandsnaam 2 spaties achter elkaar bevat, komt het niet goed in de print
+#for bestand in bronMap.rglob("*"):
+#    if bestand.is_file():
+#        relatieve_naam = bestand.relative_to(bronMap)
+#        print(relatieve_naam)
+#sys.exit("voortijdig einde")
 
 # inlezen begeleidende excel:
 excel = Path(excelmap / "Bestandsbeschrijvingen.xlsx")
@@ -20,7 +30,7 @@ if not excel.exists():
 
 # Eerste werkblad inlezen
 df = pandas.read_excel(excel, sheet_name=0)
-vereiste_kolommen = ["BestandsnaamInclPad", "id-uitgever", "vergadering.id", "vergadering.naam", "doc.id", "doc.naam", "doc.classificatie", "doc.vaststellingsdatum"]
+vereiste_kolommen = ["BestandsnaamInclPad", "id-uitgever", "vergadering.id", "vergadering.naam", "vergaderdatum", "agendapunt.id", "agendapunt.naam", "doc.id", "doc.naam", "doc.classificatie", "doc.vaststellingsdatum"]
 ontbrekende_kolommen = [
     kolom for kolom in vereiste_kolommen if kolom not in df.columns
     ]
@@ -56,16 +66,28 @@ archiefvormer = VerwijzingGegevens(
     ) 
 
 #waardering is altijd blijvend te bewaren
-waardering = BegripGegevens(begripLabel="Blijvend te bewaren",
-                            begripCode="B",
-                            begripBegrippenlijst=VerwijzingGegevens("Begrippenlijst Waarderingen MDTO")
-                            ) 
+waardering = BegripGegevens(
+    begripLabel="Blijvend te bewaren",
+    begripCode="B",
+    begripBegrippenlijst=VerwijzingGegevens("Begrippenlijst Waarderingen MDTO")
+    ) 
+informatiecategorie = BegripGegevens(
+    begripLabel="Agenda, verslag en besluitenlijst van bestuurlijke besluitvorming - Verwerkt",
+    begripCode="19.1.6",
+    begripBegrippenlijst=VerwijzingGegevens("Selectielijst gemeenten en intergemeentelijke organen 2017")
+    )
+informatiecategorieMotie = BegripGegevens(
+    begripLabel="Adhesiebetuiging en/of motie - Ingewilligd",
+    begripCode="6.1.4",
+    begripBegrippenlijst=VerwijzingGegevens("Selectielijst gemeenten en intergemeentelijke organen 2017")
+    )
 # vooralsnog Geen beperkingen, TODO: aanpassen formatting en toevoegen andere attributen 
 beperkingType = BegripGegevens("Geen beperking", VerwijzingGegevens("Begrippenlijst BeperkingGebruikTypeLijst MDTO"))
 beperkingGebruik = BeperkingGebruikGegevens(beperkingGebruikType=beperkingType)
 
 # OK, all set, here we go. We gaan voor elke rij uit de excel objecten aanmaken:
 vergaderingId=""
+agendapuntId=""
 for index, rij in df.iterrows():
     BestandsnaamInclPad = Path(str(rij["BestandsnaamInclPad"]).strip())
 
@@ -79,36 +101,46 @@ for index, rij in df.iterrows():
     bestand = bronMap / BestandsnaamInclPad
     doelbestand = doelMap / BestandsnaamInclPad
     doelbestand.parent.mkdir(parents=True, exist_ok=True)
-
     try:
         shutil.copy2(bestand, doelbestand)
-        print("bestanden succesvol gekopieerd.")
+        print("Bestand gekopieerd.")
     except Exception as fout:
         print(f"FOUT bij kopieren {bestand}: {type(fout).__name__}: {fout}")
 
     try:
-        # eerst een vergaderobject aanmaken als we een nieuwe vergadering aantreffen
-        # Voor differentiatie vergaderobject genoemd, maar het is een informatieobject
-        # TODO agendapunten aanmaken als informatieobject
+        # eerst een vergader-informatieobject aanmaken als we een nieuwe vergadering aantreffen
         if vergaderingId != str(rij["id-uitgever"]).strip() + "." + str(rij["vergadering.id"]).strip():
             vergaderingId = str(rij["id-uitgever"]).strip() + "." + str(rij["vergadering.id"]).strip()
             vergaderingNaam = str(rij["vergadering.naam"]).strip()
             print(f"Nieuwe vergadering {vergaderingNaam}")
+            
             # maak identificatiekenmerk element
             vergaderingInformatieobjectIdentificatieGegegevens = IdentificatieGegevens(vergaderingId, "gemeente Stichtse Vecht")
-
-            #optionele parameters komen in optargs:
-            optargs = {}
-
+            
+            # vergaderdatum
+            vergaderdatum = rij["vergaderdatum"]
+            # TODO: de aanvangstijd ergens aan toevoegen.
+            if pandas.notna(vergaderdatum):
+                datum_string = vergaderdatum.strftime("%Y-%m-%d")
+            else:    
+                print(f"FOUT: de vergaderdatum is niet gevonden")
+                sys.exit("voortijdig einde")
+            vergaderingDekkingInTijd = DekkingInTijdGegevens(
+                dekkingInTijdType = BegripGegevens("vergaderdatum", VerwijzingGegevens("Begrippenlijst TODO")),
+                dekkingInTijdBegindatum = datum_string
+                )
+            
             # maak vergaderobject op basis van deze gegevens
             informatieobject = Informatieobject (
                 identificatie = vergaderingInformatieobjectIdentificatieGegegevens,
                 naam = vergaderingNaam,
                 waardering = waardering,
+                informatiecategorie = informatiecategorie,
                 archiefvormer = archiefvormer,
+                taal = "nl",
+                dekkingInTijd = vergaderingDekkingInTijd,
                 beperkingGebruik = beperkingGebruik,
-                aggregatieniveau = BegripGegevens("Dossier", VerwijzingGegevens("Begrippenlijst Aggregatieniveaus MDTO")),
-                **optargs
+                aggregatieniveau = BegripGegevens("Dossier", VerwijzingGegevens("Begrippenlijst Aggregatieniveaus MDTO"))
                 )
 
             # vergaderobject opslaan (naam moet gelijk zijn aan de bovenliggende map)
@@ -129,15 +161,67 @@ for index, rij in df.iterrows():
             uitvoerbestand.parent.mkdir(parents=True, exist_ok=True)
             informatieobject.save(uitvoerbestand)
             print(f"- vergaderobject aangemaakt: {uitvoerbestand}")
+            
+            VergaderingVerwijzingGegevens = VerwijzingGegevens( 
+                    verwijzingNaam = vergaderingNaam,
+                    verwijzingIdentificatie = vergaderingInformatieobjectIdentificatieGegegevens 
+                )
+            bestandIsOnderdeel = VergaderingVerwijzingGegevens
 
+        # Mischien een agendapunt aanmaken als informatieobject
+        if pandas.notna(rij["agendapunt.id"]):
+            vgnr = int(rij["vergadering.id"])
+            apnr = int(rij["agendapunt.id"])
+            if agendapuntId != str(rij["id-uitgever"]).strip() + f".V{vgnr}.A{apnr}":
+                #Een nieuw agendapunt aanmaken:
+                agendapuntId = str(rij["id-uitgever"]).strip() + f".V{vgnr}.A{apnr}"
+                agendapuntNaam = f"Agendapunt {apnr}: " +str(rij["agendapunt.naam"]).strip()
+                print(f"Nieuw agendapunt {agendapuntNaam}")
+        
+                # maak identificatiekenmerk element
+                agendapuntInformatieobjectIdentificatieGegegevens = IdentificatieGegevens(agendapuntId, "gemeente Stichtse Vecht")
+
+                # maak vergaderobject op basis van deze gegevens
+                informatieobject = Informatieobject (
+                    identificatie = agendapuntInformatieobjectIdentificatieGegegevens,
+                    naam = agendapuntNaam,
+                    waardering = waardering,
+                    informatiecategorie = informatiecategorie,
+                    archiefvormer = archiefvormer,
+                    taal = "nl",
+                    beperkingGebruik = beperkingGebruik,
+                    aggregatieniveau = BegripGegevens("Dossier", VerwijzingGegevens("Begrippenlijst Aggregatieniveaus MDTO")),
+                    isOnderdeelVan = VergaderingVerwijzingGegevens
+                    )
+
+                # agendapuntobject opslaan 
+                agendapuntMap = BestandsnaamInclPad.parent
+                uitvoermap = doelMap / agendapuntMap
+                # de naam is gelijk zijn aan de map, maar het kan zijn dat een agenda-punt in de vergadermap zelf staat, daarom komt het apnr in de naam, zodat het uniek is.
+                uitvoerbestand = uitvoermap / f"{agendapuntMap.name}_A{apnr}.mdto.xml" #
+                uitvoerbestand.parent.mkdir(parents=True, exist_ok=True)
+                informatieobject.save(uitvoerbestand)
+                print(f"- agendapuntobject aangemaakt: {uitvoerbestand}")
+                
+                AgendapuntVerwijzingGegevens = VerwijzingGegevens( 
+                    verwijzingNaam = agendapuntNaam,
+                    verwijzingIdentificatie = agendapuntInformatieobjectIdentificatieGegegevens 
+                )
+                bestandIsOnderdeel = AgendapuntVerwijzingGegevens
+        else:
+            #geen angedapunt, dan is het besatnd weer onderdeel van de vergadering
+            bestandIsOnderdeel = VergaderingVerwijzingGegevens
+                
         # per bestand maken we eerst het informatieobject aan:
+        # technical debt: het id kunnen we beter opbouwen met de vergaderid erin.
         id = str(rij["id-uitgever"]).strip() + "." + str(rij["doc.id"]).strip()
         bestandInformatieobjectIdentificatieGegegevens = IdentificatieGegevens(id, "gemeente Stichtse Vecht")
 
         #optionele parameters komen in optargs:
         optargs = {}
 
-        # de vaststelling als event meegeven UNDER CONSTRUCTION:
+        # de vaststelling als event meegeven 
+        # UNDER CONSTRUCTION:
         vaststellingsdatum = rij["doc.vaststellingsdatum"]
         if pandas.notna(vaststellingsdatum):
             datum_string = vaststellingsdatum.strftime("%Y-%m-%d" + "T23:00:00")
@@ -148,19 +232,17 @@ for index, rij in df.iterrows():
             identificatie = bestandInformatieobjectIdentificatieGegegevens, 
             naam = str(rij["doc.naam"]).strip(),
             waardering = waardering,
+            informatiecategorie = informatiecategorieMotie if str(rij["doc.classificatie"]).strip().lower() == "motie"  else informatiecategorie,
             archiefvormer = archiefvormer,
+            taal = "nl",
             beperkingGebruik = beperkingGebruik, 
             aggregatieniveau = BegripGegevens("Archiefstuk", VerwijzingGegevens("Begrippenlijst Aggregatieniveaus MDTO")),
             classificatie = BegripGegevens(str(rij["doc.classificatie"]).strip(), VerwijzingGegevens("Begrippenlijst TODO")),
-            isOnderdeelVan = VerwijzingGegevens( 
-                verwijzingNaam = vergaderingNaam,
-                verwijzingIdentificatie = vergaderingInformatieobjectIdentificatieGegegevens 
-                ), 
+            isOnderdeelVan = bestandIsOnderdeel, 
             **optargs 
             ) 
 
-        # informatieobject opslaan (de .rsplit(".", 1)[0] haalt de extensie weg): 
-        # uitvoerbestand = doelMap / (BestandsnaamInclPad.rsplit(".", 1)[0] + ".mdto.xml") --> rsplit vervangen omdat string gaf problemen met windows versus Mac 
+        # informatieobject opslaan 
         uitvoerbestand = doelMap / BestandsnaamInclPad.with_suffix(".mdto.xml") 
         uitvoerbestand.parent.mkdir(parents=True, exist_ok=True)
         informatieobject.save(uitvoerbestand) 
