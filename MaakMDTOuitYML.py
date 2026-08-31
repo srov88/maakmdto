@@ -81,9 +81,6 @@ informatiecategorieMotie = BegripGegevens(
 beperkingType = BegripGegevens("Geen beperking", VerwijzingGegevens("Begrippenlijst BeperkingGebruikTypeLijst MDTO"))
 beperkingGebruik = BeperkingGebruikGegevens(beperkingGebruikType=beperkingType)
 
-# Globalen:
-VergaderingVerwijzingGegevens: Optional[VerwijzingGegevens] = None
-bestandIsOnderdeelVan: Optional[VerwijzingGegevens] = None
 
 
 @dataclass(frozen=True)
@@ -101,6 +98,22 @@ class Documentstatistieken:
     gekopieerd: int = 0
     gedownload: int = 0
     verwerkte_ids: set[str] = field(default_factory=set)
+
+
+@dataclass
+class Volgnummergenerator:
+    """Reik unieke MDTO-namen uit binnen één volledige uitvoer."""
+
+    volgend_nummer: int = 1
+
+    def kandidaat(self) -> str:
+        """Geef het volgende nummer zonder het al definitief uit te reiken."""
+        return f"NL-BKLVV_1820_{self.volgend_nummer:04d}"
+
+    def nieuw(self) -> str:
+        naam = self.kandidaat()
+        self.volgend_nummer += 1
+        return naam
 
 
 DOWNLOAD_TIMEOUT_SECONDEN = 60
@@ -392,7 +405,9 @@ def schrijf_mdto_xml(
     verwijzing: VerwijzingGegevens(),
     document: dict[str, Any], 
     doelbestand: Path, 
-    document_id: str
+    document_id: str,
+    mdto_naam: str,
+    dekking_in_tijd: DekkingInTijdGegevens,
 ) -> None:
     """Schrijf de sidecar na overdracht en meld een eventuele schrijffout."""
 
@@ -412,13 +427,14 @@ def schrijf_mdto_xml(
         # informatiecategorie = informatiecategorieMotie if str(rij["doc.classificatie"]).strip().lower() == "motie"  else informatiecategorie,
         archiefvormer = archiefvormer,
         taal = "nl",
+        dekkingInTijd = dekking_in_tijd,
         beperkingGebruik = beperkingGebruik, 
         aggregatieniveau = BegripGegevens("Archiefstuk", VerwijzingGegevens("Begrippenlijst Aggregatieniveaus MDTO")),
         #todo  classificatie = BegripGegevens(str(rij["doc.classificatie"]).strip(), VerwijzingGegevens("Begrippenlijst TODO")),
         isOnderdeelVan = verwijzing
         ) 
 
-    metadata_bestand = doelbestand.with_suffix(".mdto.xml")
+    metadata_bestand = doelbestand.parent / f"{mdto_naam}.mdto.xml"
     try:
         informatieobject.save(metadata_bestand)
     except OSError as fout:
@@ -441,7 +457,7 @@ def schrijf_mdto_xml(
         use_mimetype=False, 
         ) 
     
-    metadata_bestand = doelbestand.with_suffix(".bestand.mdto.xml")
+    metadata_bestand = doelbestand.parent / f"{mdto_naam}.bestand.mdto.xml"
     try:
         bestandobject.save(metadata_bestand) 
     except OSError as fout:
@@ -458,6 +474,8 @@ def verwerk_documentbestand(
     documentenlijst: dict[str, Scanverwijzing],
     doelmap: Path,
     statistieken: Documentstatistieken,
+    volgnummers: Volgnummergenerator,
+    dekking_in_tijd: DekkingInTijdGegevens,
 ) -> None:
     """Kopieer of download één document dat door schrijf_document is verwerkt."""
     document_id = normaliseer_document_id(document.get("id"))
@@ -467,7 +485,13 @@ def verwerk_documentbestand(
     verwijzing = documentenlijst.get(document_id)
 
     originele_naam = bestandsnaam_voor_document(document, verwijzing)
-    doelbestand = doelmap / maak_kopienaam(document_id, originele_naam)
+    # Reik het nummer pas definitief uit nadat kopiëren/downloaden is gelukt.
+    # Zo veroorzaken niet-verwerkte documenten geen lege map of gat in de reeks.
+    mdto_naam = volgnummers.kandidaat()
+    documentmap = doelmap / mdto_naam
+    documentmap.mkdir(parents=True, exist_ok=True)
+    extensie = Path(originele_naam).suffix
+    doelbestand = documentmap / f"{mdto_naam}{extensie}"
 
     if verwijzing is not None and verwijzing.bronbestand.is_file():
         try:
@@ -479,8 +503,16 @@ def verwerk_documentbestand(
                 file=sys.stderr,
             )
         else:
+            volgnummers.nieuw()
             statistieken.gekopieerd += 1
-            schrijf_mdto_xml(verwijzingGeg, document, doelbestand, document_id)
+            schrijf_mdto_xml(
+                verwijzingGeg,
+                document,
+                doelbestand,
+                document_id,
+                mdto_naam,
+                dekking_in_tijd,
+            )
             return
 
     url = document.get("url")
@@ -492,6 +524,8 @@ def verwerk_documentbestand(
             f"Waarschuwing: document {document_id} {reden} en heeft geen URL",
             file=sys.stderr,
         )
+        doelbestand.unlink(missing_ok=True)
+        documentmap.rmdir()
         return
 
     try:
@@ -502,9 +536,19 @@ def verwerk_documentbestand(
             f"gedownload via {url}: {fout}",
             file=sys.stderr,
         )
+        doelbestand.unlink(missing_ok=True)
+        documentmap.rmdir()
         return
+    volgnummers.nieuw()
     statistieken.gedownload += 1
-    schrijf_mdto_xml(verwijzingGeg, document, doelbestand, document_id)
+    schrijf_mdto_xml(
+        verwijzingGeg,
+        document,
+        doelbestand,
+        document_id,
+        mdto_naam,
+        dekking_in_tijd,
+    )
 
 
 def schrijf_document(
@@ -515,6 +559,8 @@ def schrijf_document(
     documentenlijst: dict[str, Scanverwijzing],
     doelmap: Path,
     statistieken: Documentstatistieken,
+    volgnummers: Volgnummergenerator,
+    dekking_in_tijd: DekkingInTijdGegevens,
 ) -> None:
     """Schrijf één document en kopieer of download het bijbehorende bestand."""
     categorie = eerste_gevulde_waarde(document.get("types")) or "-"
@@ -528,14 +574,114 @@ def schrijf_document(
     )
     print(f"{inspringing}  categorie:       {categorie}", file=uitvoer)
     print(f"{inspringing}  bestandsnaam:    {bestandsnaam}", file=uitvoer)
-    verwerk_documentbestand(verwijzing, document, documentenlijst, doelmap, statistieken)
+    verwerk_documentbestand(
+        verwijzing,
+        document,
+        documentenlijst,
+        doelmap,
+        statistieken,
+        volgnummers,
+        dekking_in_tijd,
+    )
+
+
+def schrijf_media(
+    vergadering_verwijzing: VerwijzingGegevens,
+    meeting_id: str,
+    mediatype: str,
+    volgorde: int,
+    media_item: dict[str, Any],
+    uitvoer: TextIO,
+    documentenlijst: dict[str, Scanverwijzing],
+    doelmap: Path,
+    statistieken: Documentstatistieken,
+    volgnummers: Volgnummergenerator,
+    dekking_in_tijd: DekkingInTijdGegevens,
+) -> None:
+    """Verwerk meetingmedia met dezelfde bestandslogica als een document."""
+    bestandsnaam = media_item.get("filename")
+    if not heeft_waarde(bestandsnaam):
+        print(
+            f"Waarschuwing: {mediatype} {volgorde} van meeting {meeting_id} "
+            "heeft geen bestandsnaam en wordt overgeslagen",
+            file=sys.stderr,
+        )
+        return
+
+    download_url = media_item.get("download")
+    if heeft_waarde(download_url) and str(download_url).startswith("//"):
+        download_url = "https:" + str(download_url)
+
+    media_id = f"{meeting_id}-media-{mediatype}-{volgorde}"
+    media_document = {
+        "id": media_id,
+        "title": str(bestandsnaam),
+        "url": download_url,
+        "types": [{"value": mediatype}],
+        "versions": [{"type": "file", "file_name": str(bestandsnaam)}],
+    }
+
+    print("  Media", file=uitvoer)
+    print(f"    id:              {media_id}", file=uitvoer)
+    print(f"    type:            {mediatype}", file=uitvoer)
+    print(f"    bestandsnaam:    {bestandsnaam}", file=uitvoer)
+    print(f"    download:        {download_url or '-'}", file=uitvoer)
+
+    verwerk_documentbestand(
+        vergadering_verwijzing,
+        media_document,
+        documentenlijst,
+        doelmap,
+        statistieken,
+        volgnummers,
+        dekking_in_tijd,
+    )
+
+
+def schrijf_meetingmedia(
+    meeting: dict[str, Any],
+    vergadering_verwijzing: VerwijzingGegevens,
+    uitvoer: TextIO,
+    documentenlijst: dict[str, Scanverwijzing],
+    doelmap: Path,
+    statistieken: Documentstatistieken,
+    volgnummers: Volgnummergenerator,
+    dekking_in_tijd: DekkingInTijdGegevens,
+) -> None:
+    """Verwerk alle audio en video die rechtstreeks bij de meeting horen."""
+    meeting_id = normaliseer_document_id(meeting.get("id"))
+    media = meeting.get("media")
+    if meeting_id is None or not isinstance(media, dict):
+        return
+
+    for mediatype in ("audio", "video"):
+        media_items = media.get(mediatype)
+        if not isinstance(media_items, list):
+            continue
+        for volgorde, media_item in enumerate(media_items, start=1):
+            if isinstance(media_item, dict):
+                schrijf_media(
+                    vergadering_verwijzing,
+                    meeting_id,
+                    mediatype,
+                    volgorde,
+                    media_item,
+                    uitvoer,
+                    documentenlijst,
+                    doelmap,
+                    statistieken,
+                    volgnummers,
+                    dekking_in_tijd,
+                )
 
 
 def schrijf_agendapunt_mdto_xml(
     isonderdeelvan : VerwijzingGegevens,
     agenda_item: dict[str, Any], 
     agendapuntnaam, 
-    doelmap: Path
+    doelmap: Path,
+    volgnummers: Volgnummergenerator,
+    dekking_in_tijd: DekkingInTijdGegevens,
 ) -> VerwijzingGegevens | None:
     """Schrijf de naam van een agenda-item naar een eigen MDTO-sidecar."""
     agenda_id = normaliseer_document_id(agenda_item.get("id"))
@@ -569,14 +715,13 @@ def schrijf_agendapunt_mdto_xml(
         informatiecategorie = informatiecategorie,
         archiefvormer = archiefvormer,
         taal = "nl",
+        dekkingInTijd = dekking_in_tijd,
         beperkingGebruik = beperkingGebruik,
         aggregatieniveau = BegripGegevens("Dossier", VerwijzingGegevens("Begrippenlijst Aggregatieniveaus MDTO")),
         isOnderdeelVan = isonderdeelvan
         )
 
-    metadata_bestand = doelmap / (
-        f"{agenda_id}_agendapunt_{title_prefix}.mdto.xml"
-    )
+    metadata_bestand = doelmap / f"{volgnummers.nieuw()}.mdto.xml"
     inhoud = "" if naam is None else str(naam)
     try:
         informatieobject.save(metadata_bestand)
@@ -597,7 +742,11 @@ def schrijf_agendapunt_mdto_xml(
 
 
 def schrijf_meeting_mdto_xml(
-    meeting: dict[str, Any], start_date: Any, doelmap: Path
+    meeting: dict[str, Any],
+    start_date: Any,
+    doelmap: Path,
+    volgnummers: Volgnummergenerator,
+    dekking_in_tijd: DekkingInTijdGegevens,
 ) -> VerwijzingGegevens | None:
     """Schrijf de meetingnaam naar '<id>_<naam>_<jjjjmmdd>.mdto_xml'."""
     meeting_id = normaliseer_document_id(meeting.get("id"))
@@ -632,11 +781,6 @@ def schrijf_meeting_mdto_xml(
     # TODO: de aanvangstijd ergens aan toevoegen.
     datum_string = date.fromisoformat(datumtekst).strftime("%Y-%m-%d")
 
-    vergaderingDekkingInTijd = DekkingInTijdGegevens(
-        dekkingInTijdType = BegripGegevens("vergaderdatum", VerwijzingGegevens("Begrippenlijst TODO")),
-        dekkingInTijdBegindatum = datum_string
-        )
-
     # maak vergaderobject op basis van deze gegevens
     informatieobject = Informatieobject (
         identificatie = vergaderingInformatieobjectIdentificatieGegegevens,
@@ -645,16 +789,12 @@ def schrijf_meeting_mdto_xml(
         informatiecategorie = informatiecategorie,
         archiefvormer = archiefvormer,
         taal = "nl",
-        dekkingInTijd = vergaderingDekkingInTijd,
+        dekkingInTijd = dekking_in_tijd,
         beperkingGebruik = beperkingGebruik,
         aggregatieniveau = BegripGegevens("Dossier", VerwijzingGegevens("Begrippenlijst Aggregatieniveaus MDTO"))
         )
 
-    veilige_meetingnaam = meetingnaam.replace("/", "_").replace("\\", "_")
-    bestandsnaam = maak_kopienaam(
-        meeting_id, f"{veilige_meetingnaam}_{datum_voor_naam}.mdto.xml"
-    )
-    metadata_bestand = doelmap / bestandsnaam
+    metadata_bestand = doelmap / f"{volgnummers.nieuw()}.mdto.xml"
     try:
         informatieobject.save(metadata_bestand)
     except OSError as fout:
@@ -681,6 +821,8 @@ def schrijf_agenda_item(
     documentenlijst: dict[str, Scanverwijzing],
     doelmap: Path,
     statistieken: Documentstatistieken,
+    volgnummers: Volgnummergenerator,
+    dekking_in_tijd: DekkingInTijdGegevens,
 ) -> None:
     """Schrijf een agenda-item en alle direct gekoppelde documenten."""
     inspringing = "  " * (niveau + 1)
@@ -699,7 +841,14 @@ def schrijf_agenda_item(
     print(f"{inspringing}  startseconde:  {startseconde}", file=uitvoer)
     print(f"{inspringing}  eindseconde:   {eindseconde}", file=uitvoer)
 
-    AgendapuntVerwijzingGegevens = schrijf_agendapunt_mdto_xml(isonderdeelvan, agenda_item, naam, doelmap)
+    AgendapuntVerwijzingGegevens = schrijf_agendapunt_mdto_xml(
+        isonderdeelvan,
+        agenda_item,
+        naam,
+        doelmap,
+        volgnummers,
+        dekking_in_tijd,
+    )
 
     documenten = agenda_item.get("documents")
     if isinstance(documenten, list):
@@ -713,6 +862,8 @@ def schrijf_agenda_item(
                     documentenlijst,
                     doelmap,
                     statistieken,
+                    volgnummers,
+                    dekking_in_tijd,
                 )
 
 
@@ -723,6 +874,7 @@ def schrijf_meeting(
     documentenlijst: dict[str, Scanverwijzing],
     doelmap: Path,
     statistieken: Documentstatistieken,
+    volgnummers: Volgnummergenerator,
 ) -> None:
     """Schrijf meeting, agenda-items en documenten uit een Notubiz-export."""
     if not isinstance(inhoud, dict):
@@ -748,7 +900,48 @@ def schrijf_meeting(
     print(f"  datum:      {datum}", file=uitvoer)
     print(f"  starttijd:  {starttijd}", file=uitvoer)
 
-    VergaderingVerwijzingGegevens = schrijf_meeting_mdto_xml(inhoud, start_date, doelmap)
+    if not heeft_waarde(start_date):
+        print(
+            "Waarschuwing: zonder start_date kan geen DekkingInTijd-element "
+            "worden gemaakt",
+            file=sys.stderr,
+        )
+        return
+    datumtekst = str(start_date).strip().split(maxsplit=1)[0]
+    try:
+        datum_string = date.fromisoformat(datumtekst).strftime("%Y-%m-%d")
+    except ValueError:
+        print(
+            f"Waarschuwing: ongeldige start_date: {start_date}",
+            file=sys.stderr,
+        )
+        return
+
+    vergadering_dekking_in_tijd = DekkingInTijdGegevens(
+        dekkingInTijdType=BegripGegevens(
+            "vergaderdatum", VerwijzingGegevens("Begrippenlijst TODO")
+        ),
+        dekkingInTijdBegindatum=datum_string,
+    )
+
+    VergaderingVerwijzingGegevens = schrijf_meeting_mdto_xml(
+        inhoud,
+        start_date,
+        doelmap,
+        volgnummers,
+        vergadering_dekking_in_tijd,
+    )
+
+    schrijf_meetingmedia(
+        inhoud,
+        VergaderingVerwijzingGegevens,
+        uitvoer,
+        documentenlijst,
+        doelmap,
+        statistieken,
+        volgnummers,
+        vergadering_dekking_in_tijd,
+    )
 
     for agenda_item, niveau in iter_agenda_items(inhoud.get("agenda_items")):
         schrijf_agenda_item(
@@ -759,6 +952,8 @@ def schrijf_meeting(
             documentenlijst,
             doelmap,
             statistieken,
+            volgnummers,
+            vergadering_dekking_in_tijd,
         )
 
 
@@ -772,6 +967,23 @@ def verwerk_bronmap(
     bronmap: Path, uitvoermap: Path, documentenlijstpad: Path
 ) -> int:
     """Schrijf meetings; schrijf_document verwerkt de bijbehorende bestanden."""
+    if uitvoermap.is_dir():
+        try:
+            uitvoermap_is_niet_leeg = next(uitvoermap.iterdir(), None) is not None
+        except OSError as fout:
+            print(
+                f"Waarschuwing: de inhoud van uitvoermap {uitvoermap} kon niet "
+                f"worden gecontroleerd: {fout}",
+                file=sys.stderr,
+            )
+        else:
+            if uitvoermap_is_niet_leeg:
+                print(
+                    f"Waarschuwing: uitvoermap {uitvoermap} is niet leeg; "
+                    "bestaande bestanden worden niet vooraf verwijderd.",
+                    file=sys.stderr,
+                )
+
     try:
         documentenlijst = lees_documentenlijst(documentenlijstpad)
     except (OSError, ValueError) as fout:
@@ -791,6 +1003,7 @@ def verwerk_bronmap(
     aantal_geschreven = 0
     aantal_gekopieerd = 0
     aantal_gedownload = 0
+    volgnummers = Volgnummergenerator()
     for bestand, inhoud in documenten:
         doelbestand = uitvoerpad(bronmap, uitvoermap, bestand)
         statistieken = Documentstatistieken()
@@ -804,6 +1017,7 @@ def verwerk_bronmap(
                     documentenlijst,
                     doelbestand.parent,
                     statistieken,
+                    volgnummers,
                 )
         except OSError as fout:
             print(
