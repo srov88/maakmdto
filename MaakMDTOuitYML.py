@@ -401,7 +401,7 @@ def download_document(url: str, doelbestand: Path) -> None:
             tijdelijk_pad.unlink(missing_ok=True)
 
 
-def schrijf_mdto_xml(
+def schrijf_document_mdto_xml(
     verwijzing: VerwijzingGegevens(),
     document: dict[str, Any], 
     doelbestand: Path, 
@@ -429,6 +429,7 @@ def schrijf_mdto_xml(
         taal = "nl",
         dekkingInTijd = dekking_in_tijd,
         beperkingGebruik = beperkingGebruik, 
+        classificatie = BegripGegevens("Vergadermedia" if "media" in document_id else "Document" , VerwijzingGegevens("Begrippenlijst Archiefeenheidsoorten MAIS-Flexis")),
         aggregatieniveau = BegripGegevens("Archiefstuk", VerwijzingGegevens("Begrippenlijst Aggregatieniveaus MDTO")),
         #todo  classificatie = BegripGegevens(str(rij["doc.classificatie"]).strip(), VerwijzingGegevens("Begrippenlijst TODO")),
         isOnderdeelVan = verwijzing
@@ -505,7 +506,7 @@ def verwerk_documentbestand(
         else:
             volgnummers.nieuw()
             statistieken.gekopieerd += 1
-            schrijf_mdto_xml(
+            schrijf_document_mdto_xml(
                 verwijzingGeg,
                 document,
                 doelbestand,
@@ -541,7 +542,7 @@ def verwerk_documentbestand(
         return
     volgnummers.nieuw()
     statistieken.gedownload += 1
-    schrijf_mdto_xml(
+    schrijf_document_mdto_xml(
         verwijzingGeg,
         document,
         doelbestand,
@@ -717,6 +718,7 @@ def schrijf_agendapunt_mdto_xml(
         taal = "nl",
         dekkingInTijd = dekking_in_tijd,
         beperkingGebruik = beperkingGebruik,
+        classificatie = BegripGegevens("Agendapunt", VerwijzingGegevens("Begrippenlijst Archiefeenheidsoorten MAIS-Flexis")),
         aggregatieniveau = BegripGegevens("Dossier", VerwijzingGegevens("Begrippenlijst Aggregatieniveaus MDTO")),
         isOnderdeelVan = isonderdeelvan
         )
@@ -741,7 +743,7 @@ def schrijf_agendapunt_mdto_xml(
     return AgendapuntVerwijzingGegevens
 
 
-def schrijf_meeting_mdto_xml(
+def schrijf_vergadering_mdto_xml(
     meeting: dict[str, Any],
     start_date: Any,
     doelmap: Path,
@@ -791,6 +793,7 @@ def schrijf_meeting_mdto_xml(
         taal = "nl",
         dekkingInTijd = dekking_in_tijd,
         beperkingGebruik = beperkingGebruik,
+        classificatie = BegripGegevens("Vergaderagenda", VerwijzingGegevens("Begrippenlijst Archiefeenheidsoorten MAIS-Flexis")),
         aggregatieniveau = BegripGegevens("Dossier", VerwijzingGegevens("Begrippenlijst Aggregatieniveaus MDTO"))
         )
 
@@ -924,7 +927,7 @@ def schrijf_meeting(
         dekkingInTijdBegindatum=datum_string,
     )
 
-    VergaderingVerwijzingGegevens = schrijf_meeting_mdto_xml(
+    VergaderingVerwijzingGegevens = schrijf_vergadering_mdto_xml(
         inhoud,
         start_date,
         doelmap,
@@ -976,13 +979,15 @@ def verwerk_bronmap(
                 f"worden gecontroleerd: {fout}",
                 file=sys.stderr,
             )
+            sys.exit("voortijdig einde")
         else:
-            if uitvoermap_is_niet_leeg:
+            # Checking if the list is empty or not, blijkbaar staat in een lege map op mijn pc toch nog 1 onzichtbaar bestandje, vandaar:
+            if len(os.listdir(uitvoermap)) > 1:
                 print(
-                    f"Waarschuwing: uitvoermap {uitvoermap} is niet leeg; "
-                    "bestaande bestanden worden niet vooraf verwijderd.",
+                    f"Waarschuwing: uitvoermap {uitvoermap} is niet leeg; ",
                     file=sys.stderr,
                 )
+                sys.exit("voortijdig einde")
 
     try:
         documentenlijst = lees_documentenlijst(documentenlijstpad)
