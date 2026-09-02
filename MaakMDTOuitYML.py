@@ -102,17 +102,21 @@ class Documentstatistieken:
 
 @dataclass
 class Volgnummergenerator:
-    """Reik unieke MDTO-namen uit binnen één volledige uitvoer."""
+    """Reik unieke MDTO-namen uit binnen één meeting."""
 
-    volgend_nummer: int = 1
+    meetingnummer: int
+    volgend_objectnummer: int = 1
 
     def kandidaat(self) -> str:
         """Geef het volgende nummer zonder het al definitief uit te reiken."""
-        return f"NL-BKLVV_1820_{self.volgend_nummer:04d}"
+        return (
+            f"NL-BKLVV_1820_{self.meetingnummer:04d}_"
+            f"{self.volgend_objectnummer:04d}"
+        )
 
     def nieuw(self) -> str:
         naam = self.kandidaat()
-        self.volgend_nummer += 1
+        self.volgend_objectnummer += 1
         return naam
 
 
@@ -183,7 +187,7 @@ def normaliseer_kolomnaam(waarde: Any) -> str:
     return str(waarde or "").strip().lower().replace(" ", "_")
 
 
-def lees_documentenlijst(excelpad: Path) -> dict[str, Scanverwijzing]:
+def lees_documentenlijst_excel(excelpad: Path) -> dict[str, Scanverwijzing]:
     """Lees document-id, scanlocatie en scannaam uit een Excel-werkboek."""
     if not excelpad.exists():
         raise FileNotFoundError(f"Documentenlijst bestaat niet: {excelpad}")
@@ -870,7 +874,7 @@ def schrijf_agenda_item(
                 )
 
 
-def schrijf_meeting(
+def schrijf_vergadering(
     bestand: Path,
     inhoud: Any,
     uitvoer: TextIO,
@@ -879,7 +883,7 @@ def schrijf_meeting(
     statistieken: Documentstatistieken,
     volgnummers: Volgnummergenerator,
 ) -> None:
-    """Schrijf meeting, agenda-items en documenten uit een Notubiz-export."""
+    """Schrijf vergadering, agenda-items en documenten uit een Notubiz-export."""
     if not isinstance(inhoud, dict):
         print(f"Bestand: {bestand}", file=uitvoer)
         print("YAML-hoofdstructuur is geen mapping", file=uitvoer)
@@ -966,10 +970,10 @@ def uitvoerpad(bronmap: Path, uitvoermap: Path, bronbestand: Path) -> Path:
     return (uitvoermap / relatief_pad).with_suffix(".txt")
 
 
-def verwerk_bronmap(
+def verwerk_YMLs(
     bronmap: Path, uitvoermap: Path, documentenlijstpad: Path
 ) -> int:
-    """Schrijf meetings; schrijf_document verwerkt de bijbehorende bestanden."""
+    """ Verwerkt de YML-bestanden op de bronmap en zet het resultaat op de uitvoermap."""
     if uitvoermap.is_dir():
         try:
             uitvoermap_is_niet_leeg = next(uitvoermap.iterdir(), None) is not None
@@ -990,12 +994,13 @@ def verwerk_bronmap(
                 sys.exit("voortijdig einde")
 
     try:
-        documentenlijst = lees_documentenlijst(documentenlijstpad)
+        documentenlijst = lees_documentenlijst_excel(documentenlijstpad)
     except (OSError, ValueError) as fout:
         print(f"Fout bij lezen van de documentenlijst: {fout}", file=sys.stderr)
         return 4
 
     try:
+        # Het zoeken en inlezen van de YML-bestanden
         documenten = lees_yml_bestanden(bronmap)
     except (FileNotFoundError, NotADirectoryError) as fout:
         print(f"Fout: {fout}", file=sys.stderr)
@@ -1008,14 +1013,16 @@ def verwerk_bronmap(
     aantal_geschreven = 0
     aantal_gekopieerd = 0
     aantal_gedownload = 0
-    volgnummers = Volgnummergenerator()
-    for bestand, inhoud in documenten:
+    for meetingnummer, (bestand, inhoud) in enumerate(documenten, start=1):
+        # Het eerste nummer identificeert de meeting. Het tweede nummer begint
+        # voor iedere meeting opnieuw bij 0001 en identificeert het MDTO-object.
+        volgnummers = Volgnummergenerator(meetingnummer=meetingnummer)
         doelbestand = uitvoerpad(bronmap, uitvoermap, bestand)
         statistieken = Documentstatistieken()
         try:
             doelbestand.parent.mkdir(parents=True, exist_ok=True)
             with doelbestand.open("w", encoding="utf-8", newline="\n") as uitvoer:
-                schrijf_meeting(
+                schrijf_vergadering(
                     bestand.relative_to(bronmap),
                     inhoud,
                     uitvoer,
@@ -1047,10 +1054,12 @@ def verwerk_bronmap(
     return 0
 
 
-def parse_args() -> argparse.Namespace:
-    standaard_bronmap = os.environ.get("YML_BRONMAP", "project_sources")
-    standaard_uitvoermap = os.environ.get("YML_UITVOERMAP", "uitvoer")
-    standaard_documentenlijst = os.environ.get("YML_DOCUMENTENLIJST", "Documentenlijst.xlsx")
+def parse_parameters() -> argparse.Namespace:
+    # je kan met parameters werken, maar zonder kan ook:
+    testmap = "/Users/ronaldkoenis/eclipse-workspace/maakmdto/"
+    standaard_bronmap = os.environ.get("YML_BRONMAP", testmap + "input")
+    standaard_uitvoermap = os.environ.get("YML_UITVOERMAP", testmap + "output")
+    standaard_documentenlijst = os.environ.get("YML_DOCUMENTENLIJST", "input/Documentenlijst.xlsx")
     parser = argparse.ArgumentParser(
         description=(
             "Lees Notubiz-YAML en een Excel-documentenlijst, schrijf per bron "
@@ -1082,8 +1091,8 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 def main() -> int:
-    args = parse_args()
-    return verwerk_bronmap(args.bronmap, args.uitvoermap, args.documentenlijst)
+    args = parse_parameters()
+    return verwerk_YMLs(args.bronmap, args.uitvoermap, args.documentenlijst)
 
 
 if __name__ == "__main__":
