@@ -2,8 +2,10 @@
 """Maak ORI-A XML en verzamel bestanden uit Notubiz-YAML.
 
 Het script leest recursief alle ``.yml``-bestanden uit een bronmap. Per meeting
-wordt één ORI-A 1.0.1 XML-bestand gemaakt. Documenten en meetingmedia worden,
-indien gewenst, uit een Excel-lijst gekopieerd of anders via hun URL gedownload.
+wordt één ORI-A 1.0.1 XML-bestand gemaakt met vergadering, agenda-items,
+fracties, aanwezige deelnemers, natuurlijke personen en spreekfragmenten.
+Documenten en meetingmedia worden, indien gewenst, uit een Excel-lijst
+gekopieerd of anders via hun URL gedownload.
 
 Voorbeeld:
 
@@ -53,6 +55,9 @@ GEMEENTENREGISTER = (
 )
 DOWNLOAD_TIMEOUT_SECONDEN = 60
 STANDAARD_PREFIX = "NL-BKLVV_1820"
+ID_UITGEVER = "GSV-RANU-pilot-edepot"
+DEELNEMERROLLEN = "https://ori-a.nl/begrippenlijsten#deelnemerrollen"
+FUNCTIES = "https://ori-a.nl/begrippenlijsten#functies"
 
 ET.register_namespace("", ORIA_NS)
 ET.register_namespace("xsi", XSI_NS)
@@ -129,6 +134,14 @@ def normaliseer_id(waarde: Any) -> str | None:
     if re.fullmatch(r"[+-]?\d+\.0+", tekst):
         tekst = tekst.split(".", 1)[0]
     return tekst
+
+
+def maak_id(objectcode: str, bron_id: Any) -> str:
+    """Maak een ID volgens '<id_uitgever>.<objectcode>.<bron-id>'."""
+    genormaliseerd = normaliseer_id(bron_id)
+    if genormaliseerd is None:
+        raise ValueError(f"ontbrekend bron-id voor objectcode {objectcode}")
+    return f"{ID_UITGEVER}.{objectcode}.{genormaliseerd}"
 
 
 def waarde_met_id(items: Any, gezocht_id: int, sleutel: str = "value") -> Any:
@@ -457,12 +470,240 @@ def media_documenten(meeting: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def ori_document_id(document: dict[str, Any]) -> str:
-    return f"document-{normaliseer_id(document.get('id')) or 'onbekend'}"
+    return maak_id("D", document.get("id"))
 
 
 def document_naam(document: dict[str, Any]) -> str:
     titel = document.get("title")
     return str(titel).strip() if heeft_waarde(titel) else eerste_bestandsnaam(document) or "Document"
+
+
+def iter_agenda_bomen(items: list[dict[str, Any]]):
+    """Doorloop zichtbare agenda-items en hun zichtbare kinderen."""
+    for item in items:
+        yield item
+        yield from iter_agenda_bomen(item.get("_zichtbare_kinderen", []))
+
+
+def agenda_item_naam(agenda_item: dict[str, Any]) -> str:
+    prefix, naam = agenda_item_kop(agenda_item)
+    if heeft_waarde(naam):
+        return str(naam).strip()
+    return str(prefix).strip() if heeft_waarde(prefix) else "Agendapunt"
+
+
+def spreker_id(spreker: dict[str, Any]) -> str | None:
+    attributen = spreker.get("@attributes")
+    return normaliseer_id(attributen.get("id")) if isinstance(attributen, dict) else None
+
+
+def partijgegevens(spreker: dict[str, Any]) -> tuple[str | None, str | None]:
+    partij = spreker.get("party")
+    if not isinstance(partij, dict):
+        return None, None
+    attributen = partij.get("@attributes")
+    partij_id = normaliseer_id(attributen.get("id")) if isinstance(attributen, dict) else None
+    partijnaam = str(partij.get("name")).strip() if heeft_waarde(partij.get("name")) else None
+    if partijnaam and partijnaam.lower() == "geen partij":
+        return None, None
+    return partij_id, partijnaam
+
+
+def volledige_sprekernaam(spreker: dict[str, Any]) -> str:
+    """Stel een natuurlijke schrijfwijze van de Notubiz-naam samen."""
+    delen = [
+        str(spreker.get("firstname")).strip() if heeft_waarde(spreker.get("firstname")) else "",
+        str(spreker.get("lastname_prefix")).strip() if heeft_waarde(spreker.get("lastname_prefix")) else "",
+        str(spreker.get("lastname")).strip() if heeft_waarde(spreker.get("lastname")) else "",
+    ]
+    samengesteld = " ".join(deel for deel in delen if deel)
+    if samengesteld:
+        return samengesteld
+    return str(spreker.get("name")).strip() if heeft_waarde(spreker.get("name")) else "Onbekende spreker"
+
+
+def verzamel_spreekfragmenten(
+    agenda_bomen: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Groepeer alle spreekfragmenten op het Notubiz-id van de spreker."""
+    per_spreker: dict[str, list[dict[str, Any]]] = {}
+    for agenda_item in iter_agenda_bomen(agenda_bomen):
+        agenda_id = normaliseer_id(agenda_item.get("id"))
+        if agenda_id is None:
+            continue
+        indexaties = agenda_item.get("speaker_indexation")
+        if not isinstance(indexaties, list):
+            continue
+        geldige_indexaties = [item for item in indexaties if isinstance(item, dict)]
+        def sorteersleutel(item: dict[str, Any]) -> int:
+            attributen = item.get("@attributes")
+            start = (
+                niet_negatief_getal(attributen.get("start_time"))
+                if isinstance(attributen, dict)
+                else None
+            )
+            return start if start is not None else sys.maxsize
+
+        geldige_indexaties.sort(key=sorteersleutel)
+        indexatie = agenda_item.get("indexation")
+        agenda_einde = (
+            niet_negatief_getal(indexatie.get("end_offset"))
+            if isinstance(indexatie, dict)
+            else niet_negatief_getal(agenda_item.get("end_offset"))
+        )
+        for volgorde, fragment in enumerate(geldige_indexaties):
+            attributen = fragment.get("@attributes")
+            if not isinstance(attributen, dict):
+                continue
+            gekoppelde_spreker = normaliseer_id(attributen.get("speaker_id"))
+            start = niet_negatief_getal(attributen.get("start_time"))
+            if gekoppelde_spreker is None or start is None:
+                continue
+            fragment_id = normaliseer_id(attributen.get("id"))
+            if fragment_id is None:
+                fragment_id = f"{agenda_id}-{volgorde + 1}"
+            einde = agenda_einde
+            if volgorde + 1 < len(geldige_indexaties):
+                volgende_attributen = geldige_indexaties[volgorde + 1].get("@attributes")
+                if isinstance(volgende_attributen, dict):
+                    volgende_start = niet_negatief_getal(volgende_attributen.get("start_time"))
+                    if volgende_start is not None:
+                        einde = volgende_start
+            per_spreker.setdefault(gekoppelde_spreker, []).append(
+                {
+                    "id": fragment_id,
+                    "agenda_id": agenda_id,
+                    "agenda_naam": agenda_item_naam(agenda_item),
+                    "start": start,
+                    "einde": einde,
+                    "tekst": html_naar_tekst(fragment.get("report")),
+                }
+            )
+    return per_spreker
+
+
+def voeg_overheidsorgaan_toe(parent: ET.Element) -> None:
+    voeg_begrip_toe(
+        parent,
+        "Gemeente Stichtse Vecht",
+        GEMEENTENREGISTER,
+        "Register gemeenten compleet",
+        "gm1904",
+    )
+
+
+def bouw_fracties(root: ET.Element, sprekers: list[dict[str, Any]]) -> None:
+    """Schrijf iedere bekende fractie één keer als top-level ORI-A-object."""
+    partijen: dict[str, str] = {}
+    for spreker in sprekers:
+        partij_id, partijnaam = partijgegevens(spreker)
+        if partij_id and partijnaam:
+            partijen.setdefault(partij_id, partijnaam)
+    for partij_id, partijnaam in partijen.items():
+        fractie = element(root, "fractie")
+        element(fractie, "ID", maak_id("F", partij_id))
+        element(fractie, "naam", partijnaam)
+        voeg_overheidsorgaan_toe(element(fractie, "overheidsorgaan"))
+
+
+def voeg_spreekfragment_toe(
+    deelnemer: ET.Element,
+    fragment: dict[str, Any],
+    start_date: Any,
+    media: list[dict[str, Any]],
+) -> None:
+    spreekfragment = element(deelnemer, "spreektTijdensSpreekfragment")
+    element(spreekfragment, "ID", maak_id("S", fragment["id"]))
+    element(
+        spreekfragment,
+        "naam",
+        f"Spreekfragment bij {fragment['agenda_naam']}",
+    )
+    aanvang = tijdstip_met_offset(start_date, fragment.get("start"))
+    einde = tijdstip_met_offset(start_date, fragment.get("einde"))
+    if aanvang:
+        element(spreekfragment, "aanvang", aanvang)
+    if einde:
+        element(spreekfragment, "einde", einde)
+    element(spreekfragment, "taal", "nl")
+    if heeft_waarde(fragment.get("tekst")):
+        element(spreekfragment, "tekst", fragment["tekst"])
+
+    if media:
+        for mediabron in media:
+            tijdsaanduiding = element(spreekfragment, "tijdsaanduidingMediabron")
+            element(tijdsaanduiding, "aanvang", fragment["start"])
+            if fragment.get("einde") is not None:
+                element(tijdsaanduiding, "einde", fragment["einde"])
+            if len(media) > 1:
+                voeg_informatieobject_toe(
+                    tijdsaanduiding,
+                    "isRelatiefTot",
+                    ori_document_id(mediabron),
+                    document_naam(mediabron),
+                    mediabron.get("_media_type"),
+                    MEDIABRONTYPEN,
+                )
+
+    agendapunt = element(spreekfragment, "gedurendeAgendapunt")
+    voeg_verwijzing_toe(
+        agendapunt,
+        maak_id("A", fragment["agenda_id"]),
+        fragment["agenda_naam"],
+    )
+
+
+def bouw_aanwezige_deelnemers(
+    root: ET.Element,
+    sprekers: list[dict[str, Any]],
+    meeting_id: str,
+    meetingnaam: str,
+    start_date: Any,
+    media: list[dict[str, Any]],
+    fragmenten_per_spreker: dict[str, list[dict[str, Any]]],
+) -> None:
+    """Schrijf deelnemers met natuurlijke persoon, naam en spreekfragmenten."""
+    for spreker in sprekers:
+        persoon_id = spreker_id(spreker)
+        if persoon_id is None:
+            continue
+        deelnemer = element(root, "aanwezigeDeelnemer")
+        element(deelnemer, "ID", maak_id("AD", f"{meeting_id}.{persoon_id}"))
+
+        functie = str(spreker.get("function")).strip() if heeft_waarde(spreker.get("function")) else None
+        if functie:
+            rol = element(deelnemer, "rolnaam")
+            voeg_begrip_toe(rol, functie, DEELNEMERROLLEN)
+        element(deelnemer, "organisatie", "Gemeente Stichtse Vecht")
+        deelname = element(deelnemer, "neemtDeelAanVergadering")
+        voeg_verwijzing_toe(deelname, maak_id("V", meeting_id), meetingnaam)
+
+        natuurlijk_persoon = element(deelnemer, "isNatuurlijkPersoon")
+        element(natuurlijk_persoon, "ID", maak_id("P", persoon_id))
+        naam = element(natuurlijk_persoon, "naam")
+        achternaam = (
+            str(spreker.get("lastname")).strip()
+            if heeft_waarde(spreker.get("lastname"))
+            else volledige_sprekernaam(spreker)
+        )
+        element(naam, "achternaam", achternaam)
+        if heeft_waarde(spreker.get("lastname_prefix")):
+            element(naam, "tussenvoegsel", str(spreker["lastname_prefix"]).strip())
+        if heeft_waarde(spreker.get("firstname")):
+            element(naam, "voorletters", str(spreker["firstname"]).strip())
+        element(naam, "volledigeNaam", volledige_sprekernaam(spreker))
+
+        if functie:
+            functie_element = element(natuurlijk_persoon, "functie")
+            voeg_begrip_toe(functie_element, functie, FUNCTIES)
+        partij_id, partijnaam = partijgegevens(spreker)
+        if partij_id and partijnaam:
+            lidmaatschap = element(natuurlijk_persoon, "isLidVanFractie")
+            fractie = element(lidmaatschap, "verwijzingFractie")
+            voeg_verwijzing_toe(fractie, maak_id("F", partij_id), partijnaam)
+
+        for fragment in fragmenten_per_spreker.get(persoon_id, []):
+            voeg_spreekfragment_toe(deelnemer, fragment, start_date, media)
 
 
 def bouw_agendapunt(
@@ -477,7 +718,7 @@ def bouw_agendapunt(
     prefix, naam = agenda_item_kop(agenda_item)
     naamtekst = str(naam).strip() if heeft_waarde(naam) else str(prefix).strip()
     agendapunt = element(parent, "agendapunt" if parent.tag == qnaam("ORI-A") else "heeftAlsSubagendapunt")
-    element(agendapunt, "ID", f"agendapunt-{agenda_id}")
+    element(agendapunt, "ID", maak_id("A", agenda_id))
     element(agendapunt, "naam", naamtekst)
 
     if heeft_waarde(prefix):
@@ -518,7 +759,7 @@ def bouw_agendapunt(
                 )
 
     vergadering = element(agendapunt, "wordtBehandeldTijdens")
-    voeg_verwijzing_toe(vergadering, f"vergadering-{meeting_id}", None)
+    voeg_verwijzing_toe(vergadering, maak_id("V", meeting_id), None)
 
     documenten = agenda_item.get("documents")
     if isinstance(documenten, list):
@@ -565,7 +806,7 @@ def bouw_ori_xml(meeting: dict[str, Any]) -> tuple[ET.ElementTree, list[dict[str
     root = ET.Element(qnaam("ORI-A"))
     root.set(qnaam("schemaLocation").replace(ORIA_NS, XSI_NS), SCHEMA_LOCATIE)
     vergadering = element(root, "vergadering")
-    element(vergadering, "ID", f"vergadering-{meeting_id}")
+    element(vergadering, "ID", maak_id("V", meeting_id))
     element(vergadering, "naam", meetingnaam)
     element(vergadering, "geplandeDatum", datum)
     element(vergadering, "datum", datum)
@@ -599,14 +840,7 @@ def bouw_ori_xml(meeting: dict[str, Any]) -> tuple[ET.ElementTree, list[dict[str
         element(vergadering, "weblocatie", str(meeting["url"]).strip())
     element(vergadering, "status", "Geannuleerd" if meeting.get("canceled") else "Gehouden")
 
-    overheidsorgaan = element(vergadering, "overheidsorgaan")
-    voeg_begrip_toe(
-        overheidsorgaan,
-        "Gemeente Stichtse Vecht",
-        GEMEENTENREGISTER,
-        "Register gemeenten compleet",
-        "gm1904",
-    )
+    voeg_overheidsorgaan_toe(element(vergadering, "overheidsorgaan"))
 
     media = media_documenten(meeting)
     for mediabron in media:
@@ -629,6 +863,24 @@ def bouw_ori_xml(meeting: dict[str, Any]) -> tuple[ET.ElementTree, list[dict[str
             media,
             documenten_voor_overdracht,
         )
+
+    sprekers = meeting.get("speakers")
+    geldige_sprekers = (
+        [spreker for spreker in sprekers if isinstance(spreker, dict)]
+        if isinstance(sprekers, list)
+        else []
+    )
+    fragmenten_per_spreker = verzamel_spreekfragmenten(agenda_bomen)
+    bouw_fracties(root, geldige_sprekers)
+    bouw_aanwezige_deelnemers(
+        root,
+        geldige_sprekers,
+        meeting_id,
+        meetingnaam,
+        start_date,
+        media,
+        fragmenten_per_spreker,
+    )
     return ET.ElementTree(root), documenten_voor_overdracht
 
 
