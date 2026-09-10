@@ -4,8 +4,10 @@
 Het script leest recursief alle ``.yml``-bestanden uit een bronmap. Per meeting
 wordt één ORI-A 1.0.1 XML-bestand gemaakt met vergadering, agenda-items,
 fracties, aanwezige deelnemers, natuurlijke personen en spreekfragmenten.
+Daarnaast wordt voor de vergadering een MDTO-informatieobject geschreven.
 Documenten en meetingmedia worden, indien gewenst, uit een Excel-lijst
-gekopieerd of anders via hun URL gedownload.
+gekopieerd of anders via hun URL gedownload en krijgen een informatieobject-
+en bestand-sidecar volgens MDTO-XML 1.0.1.
 
 Voorbeeld:
 
@@ -22,6 +24,8 @@ De locaties kunnen ook worden ingesteld met ``YML_BRONMAP``,
 from __future__ import annotations
 
 import argparse
+import hashlib
+import mimetypes
 import os
 import re
 import shutil
@@ -41,11 +45,16 @@ from openpyxl import load_workbook
 
 
 ORIA_NS = "https://ori-a.nl"
+MDTO_NS = "https://www.nationaalarchief.nl/mdto"
 XSI_NS = "http://www.w3.org/2001/XMLSchema-instance"
 SCHEMA_LOCATIE = (
     "https://ori-a.nl "
     "https://github.com/Regionaal-Archief-Rivierenland/"
     "ORI-A-XSD/releases/download/v1.0.1/ORI-A.xsd"
+)
+MDTO_SCHEMA_LOCATIE = (
+    "https://www.nationaalarchief.nl/mdto "
+    "https://www.nationaalarchief.nl/mdto/MDTO-XML1.0.1.xsd"
 )
 VERGADERSTUKTYPEN = "https://ori-a.nl/begrippenlijsten#vergaderstuktypes"
 MEDIABRONTYPEN = "https://ori-a.nl/begrippenlijsten#mediabrontypes"
@@ -76,6 +85,7 @@ class Statistieken:
     """Tellingen en deduplicatie voor één volledige verwerking."""
 
     xml_bestanden: int = 0
+    mdto_bestanden: int = 0
     gekopieerd: int = 0
     gedownload: int = 0
     overgeslagen: int = 0
@@ -356,11 +366,196 @@ def qnaam(naam: str) -> str:
     return f"{{{ORIA_NS}}}{naam}"
 
 
+def mdto_qnaam(naam: str) -> str:
+    return f"{{{MDTO_NS}}}{naam}"
+
+
 def element(parent: ET.Element, naam: str, waarde: Any = None) -> ET.Element:
     kind = ET.SubElement(parent, qnaam(naam))
     if waarde is not None:
         kind.text = str(waarde)
     return kind
+
+
+def mdto_element(parent: ET.Element, naam: str, waarde: Any = None) -> ET.Element:
+    kind = ET.SubElement(parent, mdto_qnaam(naam))
+    if waarde is not None:
+        kind.text = str(waarde)
+    return kind
+
+
+def mdto_identificatie(
+    parent: ET.Element,
+    identificatie_id: str,
+    bron: str = "gemeente Stichtse Vecht",
+) -> None:
+    mdto_element(parent, "identificatieKenmerk", identificatie_id)
+    mdto_element(parent, "identificatieBron", bron)
+
+
+def mdto_verwijzing(
+    parent: ET.Element,
+    naam: str,
+    identificatie_id: str | None = None,
+    bron: str = "gemeente Stichtse Vecht",
+) -> None:
+    mdto_element(parent, "verwijzingNaam", naam)
+    if identificatie_id is not None:
+        identificatie = mdto_element(parent, "verwijzingIdentificatie")
+        mdto_identificatie(identificatie, identificatie_id, bron)
+
+
+def mdto_begrip(
+    parent: ET.Element,
+    label: str,
+    begrippenlijst: str,
+    code: str | None = None,
+) -> None:
+    mdto_element(parent, "begripLabel", label)
+    if code is not None:
+        mdto_element(parent, "begripCode", code)
+    lijst = mdto_element(parent, "begripBegrippenlijst")
+    mdto_verwijzing(lijst, begrippenlijst)
+
+
+def nieuw_mdto_document(objectsoort: str) -> tuple[ET.ElementTree, ET.Element]:
+    root = ET.Element(mdto_qnaam("MDTO"))
+    root.set(f"{{{XSI_NS}}}schemaLocation", MDTO_SCHEMA_LOCATIE)
+    return ET.ElementTree(root), mdto_element(root, objectsoort)
+
+
+def voeg_mdto_dekking_in_tijd_toe(parent: ET.Element, datum: str) -> None:
+    dekking = mdto_element(parent, "dekkingInTijd")
+    dekkingstype = mdto_element(dekking, "dekkingInTijdType")
+    mdto_begrip(dekkingstype, "vergaderdatum", "Begrippenlijst TODO")
+    mdto_element(dekking, "dekkingInTijdBegindatum", datum)
+
+
+def voeg_mdto_waardering_toe(parent: ET.Element) -> None:
+    waardering = mdto_element(parent, "waardering")
+    mdto_begrip(
+        waardering,
+        "Blijvend te bewaren",
+        "Begrippenlijst Waarderingen MDTO",
+        "B",
+    )
+
+
+def voeg_mdto_informatiecategorie_toe(parent: ET.Element) -> None:
+    categorie = mdto_element(parent, "informatiecategorie")
+    mdto_begrip(
+        categorie,
+        "Agenda, verslag en besluitenlijst van bestuurlijke besluitvorming - Verwerkt",
+        "Selectielijst gemeenten en intergemeentelijke organen 2017",
+        "19.1.6",
+    )
+
+
+def voeg_mdto_archiefvormer_toe(parent: ET.Element) -> None:
+    archiefvormer = mdto_element(parent, "archiefvormer")
+    mdto_verwijzing(
+        archiefvormer,
+        "gemeente Stichtse Vecht",
+        "gm1904",
+        "TOOI register gemeenten compleet",
+    )
+
+
+def voeg_mdto_beperking_toe(parent: ET.Element) -> None:
+    beperking = mdto_element(parent, "beperkingGebruik")
+    beperkingstype = mdto_element(beperking, "beperkingGebruikType")
+    mdto_begrip(
+        beperkingstype,
+        "Geen beperking",
+        "Begrippenlijst BeperkingGebruikTypeLijst MDTO",
+    )
+
+
+def bouw_mdto_informatieobject(
+    object_id: str,
+    naam: str,
+    datum: str,
+    classificatie: str,
+    aggregatieniveau: str,
+) -> ET.ElementTree:
+    """Bouw het MDTO-informatieobject; isOnderdeelVan wordt niet geschreven."""
+    boom, informatieobject = nieuw_mdto_document("informatieobject")
+    identificatie = mdto_element(informatieobject, "identificatie")
+    mdto_identificatie(identificatie, object_id)
+    mdto_element(informatieobject, "naam", naam)
+    aggregatie = mdto_element(informatieobject, "aggregatieniveau")
+    mdto_begrip(
+        aggregatie,
+        aggregatieniveau,
+        "Begrippenlijst Aggregatieniveaus MDTO",
+    )
+    classificatie_element = mdto_element(informatieobject, "classificatie")
+    mdto_begrip(
+        classificatie_element,
+        classificatie,
+        "Begrippenlijst Archiefeenheidsoorten MAIS-Flexis",
+    )
+    voeg_mdto_dekking_in_tijd_toe(informatieobject, datum)
+    mdto_element(informatieobject, "taal", "nl")
+    voeg_mdto_waardering_toe(informatieobject)
+    voeg_mdto_informatiecategorie_toe(informatieobject)
+    voeg_mdto_archiefvormer_toe(informatieobject)
+    voeg_mdto_beperking_toe(informatieobject)
+    return boom
+
+
+def bouw_mdto_bestand(
+    document: dict[str, Any], doelbestand: Path
+) -> ET.ElementTree:
+    document_id = normaliseer_id(document.get("id"))
+    if document_id is None:
+        raise ValueError("document mist id voor MDTO-bestandsobject")
+    informatieobject_id = maak_id("D", document_id)
+    bestand_id = maak_id("B", document_id)
+    boom, bestand = nieuw_mdto_document("bestand")
+    identificatie = mdto_element(bestand, "identificatie")
+    mdto_identificatie(identificatie, bestand_id)
+    mdto_element(bestand, "naam", doelbestand.name)
+    mdto_element(bestand, "omvang", doelbestand.stat().st_size)
+
+    mime_type = mimetypes.guess_type(doelbestand.name)[0] or "application/octet-stream"
+    formaat = mdto_element(bestand, "bestandsformaat")
+    formaat_label = doelbestand.suffix.lstrip(".").lower() or mime_type
+    mdto_begrip(formaat, formaat_label, "IANA Media types", mime_type)
+
+    checksum = mdto_element(bestand, "checksum")
+    algoritme = mdto_element(checksum, "checksumAlgoritme")
+    mdto_begrip(
+        algoritme,
+        "SHA-256",
+        "Begrippenlijst ChecksumAlgoritme MDTO",
+    )
+    with doelbestand.open("rb") as invoer:
+        checksumwaarde = hashlib.file_digest(invoer, "sha256").hexdigest()
+    mdto_element(checksum, "checksumWaarde", checksumwaarde)
+    mdto_element(
+        checksum,
+        "checksumDatum",
+        datetime.now().replace(microsecond=0).isoformat(),
+    )
+
+    representatie = mdto_element(bestand, "isRepresentatieVan")
+    mdto_verwijzing(
+        representatie,
+        document_naam(document),
+        informatieobject_id,
+    )
+    return boom
+
+
+def schrijf_mdto_xml(boom: ET.ElementTree, doelbestand: Path) -> None:
+    ET.indent(boom, space="\t")
+    boom.write(
+        doelbestand,
+        encoding="utf-8",
+        xml_declaration=True,
+        default_namespace=MDTO_NS,
+    )
 
 
 def voeg_verwijzing_toe(parent: ET.Element, verwijzing_id: str, naam: str | None) -> None:
@@ -889,6 +1084,74 @@ def schrijf_ori_xml(boom: ET.ElementTree, doelbestand: Path) -> None:
     boom.write(doelbestand, encoding="utf-8", xml_declaration=True)
 
 
+def meeting_mdto_gegevens(meeting: dict[str, Any]) -> tuple[str, str, str]:
+    meeting_id = normaliseer_id(meeting.get("id"))
+    meetingnaam = waarde_met_id(meeting.get("attributes"), 1)
+    meetingnaam = str(meetingnaam).strip() if heeft_waarde(meetingnaam) else ""
+    planningen = meeting.get("plannings")
+    planning = planningen[0] if isinstance(planningen, list) and planningen else {}
+    datum = xml_date(planning.get("start_date")) if isinstance(planning, dict) else None
+    if meeting_id is None or not meetingnaam or datum is None:
+        raise ValueError("meeting mist id, naam of start_date voor MDTO")
+    return meeting_id, meetingnaam, datum
+
+
+def schrijf_vergadering_mdto_xml(
+    meeting: dict[str, Any], doelbestand: Path
+) -> None:
+    meeting_id, meetingnaam, datum = meeting_mdto_gegevens(meeting)
+    boom = bouw_mdto_informatieobject(
+        maak_id("V", meeting_id),
+        f"{meetingnaam} {datum}",
+        datum,
+        "Vergaderagenda",
+        "Dossier",
+    )
+    schrijf_mdto_xml(boom, doelbestand)
+
+
+def schrijf_document_mdto_sidecars(
+    document: dict[str, Any],
+    doelbestand: Path,
+    objectnaam: str,
+    dekking_datum: str,
+) -> bool:
+    """Schrijf beide sidecars pas nadat het documentbestand is overgedragen."""
+    document_id = normaliseer_id(document.get("id"))
+    if document_id is None:
+        return False
+    informatieobject_pad = doelbestand.parent / f"{objectnaam}.mdto.xml"
+    bestand_pad = doelbestand.parent / f"{objectnaam}.bestand.mdto.xml"
+    tijdelijk_informatieobject = doelbestand.parent / f".{objectnaam}.mdto.xml.tmp"
+    tijdelijk_bestand = doelbestand.parent / f".{objectnaam}.bestand.mdto.xml.tmp"
+    classificatie = "Vergadermedia" if "-media-" in document_id else "Document"
+    try:
+        informatieobject = bouw_mdto_informatieobject(
+            maak_id("D", document_id),
+            document_naam(document),
+            dekking_datum,
+            classificatie,
+            "Archiefstuk",
+        )
+        schrijf_mdto_xml(informatieobject, tijdelijk_informatieobject)
+        schrijf_mdto_xml(
+            bouw_mdto_bestand(document, doelbestand),
+            tijdelijk_bestand,
+        )
+        tijdelijk_informatieobject.replace(informatieobject_pad)
+        tijdelijk_bestand.replace(bestand_pad)
+    except (OSError, TypeError, ValueError) as fout:
+        tijdelijk_informatieobject.unlink(missing_ok=True)
+        tijdelijk_bestand.unlink(missing_ok=True)
+        print(
+            f"Waarschuwing: MDTO-sidecars voor document {document_id} konden "
+            f"niet worden geschreven: {fout}",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
 def valideer_xml(xmlbestand: Path, xsd_pad: Path) -> None:
     """Valideer met lxml als een XSD-pad is opgegeven."""
     try:
@@ -906,6 +1169,7 @@ def verwerk_documentbestand(
     meetingmap: Path,
     nummering: Meetingnummering,
     statistieken: Statistieken,
+    dekking_datum: str,
 ) -> None:
     document_id = normaliseer_id(document.get("id"))
     if document_id is None or document_id in statistieken.verwerkte_document_ids:
@@ -932,6 +1196,10 @@ def verwerk_documentbestand(
         else:
             nummering.nieuw()
             statistieken.gekopieerd += 1
+            if schrijf_document_mdto_sidecars(
+                document, doelbestand, objectnaam, dekking_datum
+            ):
+                statistieken.mdto_bestanden += 2
             return
 
     url = document.get("url")
@@ -955,6 +1223,10 @@ def verwerk_documentbestand(
         return
     nummering.nieuw()
     statistieken.gedownload += 1
+    if schrijf_document_mdto_sidecars(
+        document, doelbestand, objectnaam, dekking_datum
+    ):
+        statistieken.mdto_bestanden += 2
 
 
 def uitvoermap_is_niet_leeg(uitvoermap: Path) -> bool:
@@ -1003,42 +1275,60 @@ def verwerk_ymls(
         )
         nummering = Meetingnummering(kandidaat_meetingnummer, prefix)
         tijdelijk_xmlbestand: Path | None = None
+        tijdelijk_mdto_bestand: Path | None = None
         try:
             boom, documenten = bouw_ori_xml(meeting)
+            _, _, dekking_datum = meeting_mdto_gegevens(meeting)
             meetingmap.mkdir(parents=True, exist_ok=True)
             xmlnaam = nummering.nieuw()
             xmlbestand = meetingmap / f"{xmlnaam}.ori-a.xml"
+            mdto_bestand = meetingmap / f"{xmlnaam}.mdto.xml"
             tijdelijk_xmlbestand = meetingmap / f".{xmlnaam}.ori-a.xml.tmp"
+            tijdelijk_mdto_bestand = meetingmap / f".{xmlnaam}.mdto.xml.tmp"
             schrijf_ori_xml(boom, tijdelijk_xmlbestand)
+            schrijf_vergadering_mdto_xml(meeting, tijdelijk_mdto_bestand)
             if xsd_pad is not None:
                 valideer_xml(tijdelijk_xmlbestand, xsd_pad)
             tijdelijk_xmlbestand.replace(xmlbestand)
             tijdelijk_xmlbestand = None
+            tijdelijk_mdto_bestand.replace(mdto_bestand)
+            tijdelijk_mdto_bestand = None
         except (OSError, TypeError, ValueError, RuntimeError) as fout:
             if tijdelijk_xmlbestand is not None:
                 tijdelijk_xmlbestand.unlink(missing_ok=True)
+            if tijdelijk_mdto_bestand is not None:
+                tijdelijk_mdto_bestand.unlink(missing_ok=True)
             print(f"Waarschuwing: {relatief} overgeslagen: {fout}", file=sys.stderr)
             continue
         except Exception as fout:
             # lxml.etree.DocumentInvalid is niet beschikbaar zonder lxml-import.
             if tijdelijk_xmlbestand is not None:
                 tijdelijk_xmlbestand.unlink(missing_ok=True)
+            if tijdelijk_mdto_bestand is not None:
+                tijdelijk_mdto_bestand.unlink(missing_ok=True)
             print(f"Waarschuwing: ORI-A-validatie mislukte voor {relatief}: {fout}", file=sys.stderr)
             continue
 
         meetingvolgnummer = kandidaat_meetingnummer
         statistieken.xml_bestanden += 1
+        statistieken.mdto_bestanden += 1
         statistieken.verwerkte_document_ids.clear()
-        print(f"ORI-A geschreven: {xmlbestand}")
+        print(f"ORI-A en vergadering-MDTO geschreven: {xmlbestand}")
         if alleen_xml:
             continue
         for document in documenten:
             verwerk_documentbestand(
-                document, documentenlijst, meetingmap, nummering, statistieken
+                document,
+                documentenlijst,
+                meetingmap,
+                nummering,
+                statistieken,
+                dekking_datum,
             )
 
     print(
         f"{statistieken.xml_bestanden} ORI-A-bestand(en), "
+        f"{statistieken.mdto_bestanden} MDTO-bestand(en), "
         f"{statistieken.gekopieerd} bestand(en) gekopieerd, "
         f"{statistieken.gedownload} gedownload en "
         f"{statistieken.overgeslagen} overgeslagen."
@@ -1049,7 +1339,8 @@ def verwerk_ymls(
 def parse_parameters() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Lees Notubiz-YAML, genereer ORI-A XML en verzamel documenten/media."
+            "Lees Notubiz-YAML, genereer ORI-A en MDTO XML en verzamel "
+            "documenten/media."
         )
     )
     parser.add_argument(
@@ -1081,7 +1372,10 @@ def parse_parameters() -> argparse.Namespace:
     parser.add_argument(
         "--alleen-xml",
         action="store_true",
-        help="Genereer en valideer XML zonder documenten of media over te dragen",
+        help=(
+            "Genereer ORI-A en vergadering-MDTO zonder documenten of media "
+            "over te dragen"
+        ),
     )
     parser.add_argument(
         "--overschrijf",
