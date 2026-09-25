@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Schrijf documenten uit NotuBiz-meetingexports naar één CSV-bestand.
+"""Schrijf documenten uit NotuBiz-meetingexports naar één Excelbestand.
 
 t.b.v. pilot gemeente Stichtse Vecht NotuBiz --> RANU MAIS-Flexis.
 Volledig AI-gegenereerd 
@@ -7,19 +7,18 @@ Volledig AI-gegenereerd
 Je gebruikt dit om een aanvulbare excel te genereren, die te gebruiken is in de maakMDTOuitYML.py
 
 Installatie:
-    python -m pip install PyYAML
+    python -m pip install PyYAML openpyxl
 
 Gebruik:
     python toon_documenten.py
     python toon_documenten.py --bronmap "C:\\Exports"
-    python toon_documenten.py --bronmap ./exports --uitvoer documenten.csv
-    python toon_documenten.py --bronmap ./exports --recursief
+    python toon_documenten.py --bronmap ./exports --uitvoer documenten.xlsx
+    python toon_documenten.py --bronmap ./exports
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import re
 import sys
 from datetime import date, datetime
@@ -34,12 +33,21 @@ except ImportError:
         "python -m pip install PyYAML"
     )
 
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+except ImportError:
+    sys.exit(
+        "openpyxl ontbreekt. Installeer dit pakket met: "
+        "python -m pip install openpyxl"
+    )
+
 
 # Pas deze map aan als je het script zonder --bronmap wilt starten.
 BRONMAP = Path(r"./bronmap")
 
 # Pas deze bestandsnaam aan als je het script zonder --uitvoer wilt starten.
-UITVOERBESTAND = Path("documenten.csv")
+UITVOERBESTAND = Path("documenten.xlsx")
 
 # NotuBiz-exports kunnen C0/C1-stuurtekens bevatten die niet geldig zijn in YAML.
 ONGELDIGE_TEKENS = re.compile(
@@ -101,11 +109,16 @@ def bestandsnaam(document: dict[str, Any]) -> str:
     return tekstwaarde(versies[-1]["file_name"])
 
 
+def geheim(document: dict[str, Any]) -> str:
+    """Geef de Excel-markering voor een vertrouwelijk document terug."""
+    return "" if document.get("confidential") == 0 else "geheim"
+
+
 def documenten_uit_agenda(
     agenda_items: Any,
     overgenomen_prefix: str = "",
-) -> Iterator[tuple[str, str, str, str]]:
-    """Lever prefix, document-id, titel en bestandsnaam uit alle agendapunten."""
+) -> Iterator[tuple[str, str, str, str, str]]:
+    """Lever prefix, documentgegevens en geheim-markering uit alle agendapunten."""
     for item in als_lijst(agenda_items):
         if not isinstance(item, dict):
             continue
@@ -124,18 +137,18 @@ def documenten_uit_agenda(
                 tekstwaarde(document.get("id")),
                 tekstwaarde(document.get("title")),
                 bestandsnaam(document),
+                geheim(document),
             )
 
         yield from documenten_uit_agenda(item.get("agenda_items"), prefix)
 
 
-def yaml_bestanden(bronmap: Path, recursief: bool) -> list[Path]:
+def yaml_bestanden(bronmap: Path) -> list[Path]:
+    """Vind alle YAML-bestanden in de bronmap en de onderliggende mappen."""
     patronen = ("*.yml", "*.yaml")
     bestanden: list[Path] = []
     for patroon in patronen:
-        bestanden.extend(
-            bronmap.rglob(patroon) if recursief else bronmap.glob(patroon)
-        )
+        bestanden.extend(bronmap.rglob(patroon))
     return sorted(set(bestanden), key=lambda pad: str(pad).casefold())
 
 
@@ -148,7 +161,7 @@ def argumenten() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Schrijf documenten uit alle NotuBiz-YAML-bestanden in een bronmap "
-            "naar één CSV-bestand."
+            "naar één Excelbestand."
         )
     )
     parser.add_argument(
@@ -160,13 +173,13 @@ def argumenten() -> argparse.Namespace:
     parser.add_argument(
         "--recursief",
         action="store_true",
-        help="doorzoek ook onderliggende mappen",
+        help="compatibiliteitsoptie; submappen worden altijd doorzocht",
     )
     parser.add_argument(
         "--uitvoer",
         type=Path,
         default=UITVOERBESTAND,
-        help=f"te schrijven CSV-bestand (standaard: {UITVOERBESTAND})",
+        help=f"te schrijven Excelbestand (standaard: {UITVOERBESTAND})",
     )
     return parser.parse_args()
 
@@ -178,25 +191,32 @@ def main() -> int:
         print(f"Fout: bronmap bestaat niet of is geen map: {bronmap}", file=sys.stderr)
         return 2
 
-    bestanden = yaml_bestanden(bronmap, args.recursief)
+    bestanden = yaml_bestanden(bronmap)
     if not bestanden:
         print(f"Geen .yml- of .yaml-bestanden gevonden in: {bronmap}", file=sys.stderr)
         return 1
 
-    rijen: list[tuple[str, str, str, str, str]] = []
+    rijen: list[tuple[str, str, str, str, str, str]] = []
     aantal_fouten = 0
 
     for yaml_pad in bestanden:
         try:
             meeting = lees_yaml(yaml_pad)
             startdatum = meeting_startdatum(meeting)
-            for prefix, document_id, titel, naam in documenten_uit_agenda(
+            for prefix, document_id, titel, naam, geheim_markering in documenten_uit_agenda(
                 meeting.get("agenda_items")
             ):
                 rijen.append(
                     tuple(
                         veilige_kolom(kolom)
-                        for kolom in (startdatum, prefix, document_id, titel, naam)
+                        for kolom in (
+                            startdatum,
+                            prefix,
+                            document_id,
+                            titel,
+                            naam,
+                            geheim_markering,
+                        )
                     )
                 )
         except (OSError, UnicodeError, yaml.YAMLError, ValueError) as fout:
@@ -204,16 +224,34 @@ def main() -> int:
             aantal_fouten += 1
 
     uitvoerpad = args.uitvoer.expanduser()
+    if uitvoerpad.suffix.casefold() != ".xlsx":
+        uitvoerpad = uitvoerpad.with_suffix(".xlsx")
     try:
         uitvoerpad.parent.mkdir(parents=True, exist_ok=True)
-        with uitvoerpad.open("w", encoding="utf-8-sig", newline="") as csv_bestand:
-            schrijver = csv.writer(csv_bestand, delimiter=";", lineterminator="\n")
-            schrijver.writerow(
-                ("start_date", "agendapunt", "document_id", "titel", "bestandsnaam")
-            )
-            schrijver.writerows(rijen)
+        werkmap = Workbook()
+        werkblad = werkmap.active
+        werkblad.title = "Documenten"
+        koppen = (
+            "Vergaderdatum",
+            "agendapunt",
+            "document_id",
+            "titel",
+            "NotuBizbestandsnaam",
+            "Geheim",
+        )
+        werkblad.append(koppen)
+        for cel in werkblad[1]:
+            cel.font = Font(bold=True)
+        for rij in rijen:
+            werkblad.append(rij)
+        werkblad.freeze_panes = "A2"
+        werkblad.auto_filter.ref = werkblad.dimensions
+        for kolom in werkblad.columns:
+            breedte = max(len(str(cel.value or "")) for cel in kolom)
+            werkblad.column_dimensions[kolom[0].column_letter].width = min(breedte + 2, 60)
+        werkmap.save(uitvoerpad)
     except OSError as fout:
-        print(f"Fout: CSV-bestand kan niet worden geschreven: {fout}", file=sys.stderr)
+        print(f"Fout: Excelbestand kan niet worden geschreven: {fout}", file=sys.stderr)
         return 2
 
     print(
