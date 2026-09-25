@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import mimetypes
 import os
 import re
@@ -82,6 +83,36 @@ class Scanverwijzing:
 
     bronbestand: Path
     originele_bestandsnaam: str
+    geheim: bool = False
+    regelnummer: int = 0
+
+
+@dataclass(frozen=True)
+class DocumentenlijstRij:
+    """Een niet-lege gegevensrij uit de documentenlijst."""
+
+    regelnummer: int
+    waarden: dict[str, Any]
+
+
+@dataclass
+class Documentenlijst:
+    """Verwijzingen en herleidbare gebruiksstatus van de documentenlijst."""
+
+    verwijzingen: dict[str, Scanverwijzing] = field(default_factory=dict)
+    rijen: list[DocumentenlijstRij] = field(default_factory=list)
+    gebruikte_regelnummers: set[int] = field(default_factory=set)
+
+    def vind_verwijzing(self, document_id: str) -> Scanverwijzing | None:
+        verwijzing = self.verwijzingen.get(document_id)
+        if verwijzing is not None:
+            self.gebruikte_regelnummers.add(verwijzing.regelnummer)
+        return verwijzing
+
+    def ongebruikte_rijen(self) -> list[DocumentenlijstRij]:
+        return [
+            rij for rij in self.rijen if rij.regelnummer not in self.gebruikte_regelnummers
+        ]
 
 
 @dataclass(frozen=True)
@@ -103,6 +134,56 @@ class Statistieken:
     gedownload: int = 0
     overgeslagen: int = 0
     verwerkte_document_ids: set[str] = field(default_factory=set)
+
+
+@dataclass
+class Uitvoerlog:
+    """Registreer iedere succesvolle bestand-aanmaak in de output-root."""
+
+    uitvoermap: Path
+    pad: Path = field(init=False)
+    aantallen_per_soort: dict[str, int] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.pad = self.uitvoermap / "aanmaaklog.txt"
+        self.pad.write_text(
+            "Logbestand bestandsaanmaak\n"
+            f"Gestart: {self.tijdstip()}\n"
+            "Tijdstip | Soort | Bestandsnaam\n",
+            encoding="utf-8",
+        )
+        self.registreer("Logbestand", self.pad)
+
+    @staticmethod
+    def tijdstip() -> str:
+        return datetime.now().astimezone().isoformat(timespec="seconds")
+
+    def registreer(self, soort: str, bestand: Path) -> None:
+        bestandsnaam = bestand.relative_to(self.uitvoermap).as_posix()
+        with self.pad.open("a", encoding="utf-8") as uitvoer:
+            uitvoer.write(f"{self.tijdstip()} | {soort} | {bestandsnaam}\n")
+        self.aantallen_per_soort[soort] = self.aantallen_per_soort.get(soort, 0) + 1
+
+    def schrijf_samenvatting(self) -> None:
+        with self.pad.open("a", encoding="utf-8") as uitvoer:
+            uitvoer.write("\nAantal aangemaakte bestanden per soort:\n")
+            for soort, aantal in sorted(self.aantallen_per_soort.items()):
+                uitvoer.write(f"{soort}: {aantal}\n")
+
+    def schrijf_ongebruikte_documentenlijst_rijen(
+        self, documentenlijst: Documentenlijst
+    ) -> None:
+        ongebruikte_rijen = documentenlijst.ongebruikte_rijen()
+        with self.pad.open("a", encoding="utf-8") as uitvoer:
+            uitvoer.write(
+                "\nNiet-gebruikte rijen uit Documentenlijst: "
+                f"{len(ongebruikte_rijen)}\n"
+            )
+            for rij in ongebruikte_rijen:
+                uitvoer.write(
+                    f"Rij {rij.regelnummer}: "
+                    f"{json.dumps(rij.waarden, ensure_ascii=False, default=str)}\n"
+                )
 
 
 @dataclass
@@ -226,10 +307,15 @@ def normaliseer_kolomnaam(waarde: Any) -> str:
     return re.sub(r"[\s_-]+", "", str(waarde or "").strip().lower())
 
 
-def lees_documentenlijst(excelpad: Path | None) -> dict[str, Scanverwijzing]:
-    """Lees document_id, scanlocatie/spanlocatie en scannaam uit Excel."""
+def is_geheim(waarde: Any) -> bool:
+    """Herken de expliciete aanduiding ``geheim`` uit de documentenlijst."""
+    return heeft_waarde(waarde) and str(waarde).strip().casefold() == "geheim"
+
+
+def lees_documentenlijst(excelpad: Path | None) -> Documentenlijst:
+    """Lees documentgegevens en de optionele beperking uit Excel."""
     if excelpad is None:
-        return {}
+        return Documentenlijst()
     if not excelpad.is_file():
         raise FileNotFoundError(f"Documentenlijst bestaat niet: {excelpad}")
 
@@ -242,19 +328,31 @@ def lees_documentenlijst(excelpad: Path | None) -> dict[str, Scanverwijzing]:
         except StopIteration as fout:
             raise ValueError("De documentenlijst is leeg") from fout
 
+        kopteksten = [
+            str(kop).strip() if heeft_waarde(kop) else f"Kolom {index + 1}"
+            for index, kop in enumerate(koppen)
+        ]
         kolommen = {
-            normaliseer_kolomnaam(kop): index for index, kop in enumerate(koppen)
+            normaliseer_kolomnaam(kop): index for index, kop in enumerate(kopteksten)
         }
         id_kolom = kolommen.get("documentid")
         locatie_kolom = kolommen.get("scanlocatie", kolommen.get("spanlocatie"))
         naam_kolom = kolommen.get("scannaam")
+        geheim_kolom = kolommen.get("geheim")
         if None in (id_kolom, locatie_kolom, naam_kolom):
             raise ValueError(
                 "Excel moet document_id, scanlocatie/spanlocatie en scannaam bevatten"
             )
 
-        verwijzingen: dict[str, Scanverwijzing] = {}
-        for rij in rijen:
+        documentenlijst = Documentenlijst()
+        for regelnummer, rij in enumerate(rijen, start=2):
+            if not any(heeft_waarde(waarde) for waarde in rij):
+                continue
+            waarden = {
+                kop: "" if waarde is None else waarde
+                for kop, waarde in zip(kopteksten, rij)
+            }
+            documentenlijst.rijen.append(DocumentenlijstRij(regelnummer, waarden))
             document_id = normaliseer_id(rij[id_kolom])
             if document_id is None:
                 continue
@@ -265,11 +363,13 @@ def lees_documentenlijst(excelpad: Path | None) -> dict[str, Scanverwijzing]:
             locatiepad = Path(str(locatie).strip()).expanduser()
             if not locatiepad.is_absolute():
                 locatiepad = excelpad.parent / locatiepad
-            verwijzingen[document_id] = Scanverwijzing(
+            documentenlijst.verwijzingen[document_id] = Scanverwijzing(
                 bronbestand=locatiepad / str(scannaam).strip(),
                 originele_bestandsnaam=str(scannaam).strip(),
+                geheim=is_geheim(rij[geheim_kolom]) if geheim_kolom is not None else False,
+                regelnummer=regelnummer,
             )
-        return verwijzingen
+        return documentenlijst
     finally:
         werkmap.close()
 
@@ -473,12 +573,13 @@ def voeg_mdto_archiefvormer_toe(parent: ET.Element) -> None:
     )
 
 
-def voeg_mdto_beperking_toe(parent: ET.Element) -> None:
+def voeg_mdto_beperking_toe(parent: ET.Element, geheim: bool = False) -> None:
+    """Voeg de gebruiksbeperking uit de documentenlijst aan MDTO toe."""
     beperking = mdto_element(parent, "beperkingGebruik")
     beperkingstype = mdto_element(beperking, "beperkingGebruikType")
     mdto_begrip(
         beperkingstype,
-        "Geen beperking",
+        "Geheim" if geheim else "Geen beperking",
         "Begrippenlijst BeperkingGebruikTypeLijst MDTO",
     )
 
@@ -491,6 +592,7 @@ def bouw_mdto_informatieobject(
     aggregatieniveau: str,
     onderdeel_van_id: str | None = None,
     onderdeel_van_naam: str | None = None,
+    geheim: bool = False,
 ) -> ET.ElementTree:
     """Bouw een MDTO-informatieobject met optionele bovenliggende aggregatie."""
     boom, informatieobject = nieuw_mdto_document("informatieobject")
@@ -521,7 +623,7 @@ def bouw_mdto_informatieobject(
             onderdeel_van_id,
         )
     voeg_mdto_archiefvormer_toe(informatieobject)
-    voeg_mdto_beperking_toe(informatieobject)
+    voeg_mdto_beperking_toe(informatieobject, geheim)
     return boom
 
 
@@ -1164,6 +1266,7 @@ def schrijf_agendapunten_mdto_xml(
     meetingmap: Path,
     nummering: Meetingnummering,
     statistieken: Statistieken,
+    uitvoerlog: Uitvoerlog,
 ) -> None:
     """Schrijf ieder zelfstandig ORI-A-agendapunt ook als MDTO-object."""
     meeting_id, meetingnaam, datum = meeting_mdto_gegevens(meeting)
@@ -1202,6 +1305,7 @@ def schrijf_agendapunten_mdto_xml(
             continue
         nummering.nieuw()
         statistieken.mdto_bestanden += 1
+        uitvoerlog.registreer("MDTO-agendapunt", doelbestand)
 
 
 def schrijf_document_mdto_sidecars(
@@ -1211,6 +1315,8 @@ def schrijf_document_mdto_sidecars(
     dekking_datum: str,
     onderdeel_van_id: str,
     onderdeel_van_naam: str,
+    geheim: bool,
+    uitvoerlog: Uitvoerlog,
 ) -> bool:
     """Schrijf beide sidecars pas nadat het documentbestand is overgedragen."""
     document_id = normaliseer_id(document.get("id"))
@@ -1230,6 +1336,7 @@ def schrijf_document_mdto_sidecars(
             "Archiefstuk",
             onderdeel_van_id,
             onderdeel_van_naam,
+            geheim,
         )
         schrijf_mdto_xml(informatieobject, tijdelijk_informatieobject)
         schrijf_mdto_xml(
@@ -1247,6 +1354,8 @@ def schrijf_document_mdto_sidecars(
             file=sys.stderr,
         )
         return False
+    uitvoerlog.registreer("MDTO-informatieobject", informatieobject_pad)
+    uitvoerlog.registreer("MDTO-bestand", bestand_pad)
     return True
 
 
@@ -1263,18 +1372,19 @@ def valideer_xml(xmlbestand: Path, xsd_pad: Path) -> None:
 
 def verwerk_documentbestand(
     overdracht: Documentoverdracht,
-    documentenlijst: dict[str, Scanverwijzing],
+    documentenlijst: Documentenlijst,
     meetingmap: Path,
     nummering: Meetingnummering,
     statistieken: Statistieken,
     dekking_datum: str,
+    uitvoerlog: Uitvoerlog,
 ) -> None:
     document = overdracht.document
     document_id = normaliseer_id(document.get("id"))
     if document_id is None or document_id in statistieken.verwerkte_document_ids:
         return
     statistieken.verwerkte_document_ids.add(document_id)
-    verwijzing = documentenlijst.get(document_id)
+    verwijzing = documentenlijst.vind_verwijzing(document_id)
     originele_naam = bestandsnaam_voor_document(document, verwijzing)
     # Reik het nummer pas definitief uit na een geslaagde kopie of download.
     objectnaam = nummering.kandidaat()
@@ -1295,6 +1405,7 @@ def verwerk_documentbestand(
         else:
             nummering.nieuw()
             statistieken.gekopieerd += 1
+            uitvoerlog.registreer("Document (gekopieerd)", doelbestand)
             if schrijf_document_mdto_sidecars(
                 document,
                 doelbestand,
@@ -1302,6 +1413,8 @@ def verwerk_documentbestand(
                 dekking_datum,
                 overdracht.onderdeel_van_id,
                 overdracht.onderdeel_van_naam,
+                verwijzing.geheim if verwijzing is not None else False,
+                uitvoerlog,
             ):
                 statistieken.mdto_bestanden += 2
             return
@@ -1327,6 +1440,7 @@ def verwerk_documentbestand(
         return
     nummering.nieuw()
     statistieken.gedownload += 1
+    uitvoerlog.registreer("Document (gedownload)", doelbestand)
     if schrijf_document_mdto_sidecars(
         document,
         doelbestand,
@@ -1334,6 +1448,8 @@ def verwerk_documentbestand(
         dekking_datum,
         overdracht.onderdeel_van_id,
         overdracht.onderdeel_van_naam,
+        verwijzing.geheim if verwijzing is not None else False,
+        uitvoerlog,
     ):
         statistieken.mdto_bestanden += 2
 
@@ -1373,6 +1489,7 @@ def verwerk_ymls(
 
     statistieken = Statistieken()
     uitvoermap.mkdir(parents=True, exist_ok=True)
+    uitvoerlog = Uitvoerlog(uitvoermap)
     meetingvolgnummer = 0
     for bronbestand, meeting in meetings:
         kandidaat_meetingnummer = meetingvolgnummer + 1
@@ -1422,6 +1539,8 @@ def verwerk_ymls(
         statistieken.xml_bestanden += 1
         statistieken.mdto_bestanden += 1
         statistieken.verwerkte_document_ids.clear()
+        uitvoerlog.registreer("ORI-A", xmlbestand)
+        uitvoerlog.registreer("MDTO-vergadering", mdto_bestand)
         print(f"ORI-A en vergadering-MDTO geschreven: {xmlbestand}")
         schrijf_agendapunten_mdto_xml(
             agenda_items,
@@ -1429,6 +1548,7 @@ def verwerk_ymls(
             meetingmap,
             nummering,
             statistieken,
+            uitvoerlog,
         )
         if alleen_xml:
             continue
@@ -1440,8 +1560,11 @@ def verwerk_ymls(
                 nummering,
                 statistieken,
                 dekking_datum,
+                uitvoerlog,
             )
 
+    uitvoerlog.schrijf_samenvatting()
+    uitvoerlog.schrijf_ongebruikte_documentenlijst_rijen(documentenlijst)
     print(
         f"{statistieken.xml_bestanden} ORI-A-bestand(en), "
         f"{statistieken.mdto_bestanden} MDTO-bestand(en), "
